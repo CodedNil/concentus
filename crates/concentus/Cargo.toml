@@ -1,0 +1,16 @@
+[package]
+name = "concentus"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+concentus_types = { path = "../concentus_types" }
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "query",
+] }
+serde.workspace = true
+thiserror = "2"
+
+[lints]
+workspace = true

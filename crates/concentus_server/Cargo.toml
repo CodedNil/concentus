@@ -1,0 +1,41 @@
+[package]
+name = "concentus_server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# API encoding
+concentus_types = { path = "../concentus_types" }
+
+# Local storage
+directories = "6"
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite-bundled",
+    "migrate",
+    "macros",
+] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "signal",
+] }
+serde.workspace = true
+serde-value = "0.7"
+
+# Web
+topcoat = { version = "0.12.1", default-features = false, features = [
+    "router",
+    "view",
+    "metadata",
+    "serve",
+] }
+
+[build-dependencies]
+topcoat = { version = "0.12.1", default-features = false, features = [
+    "tailwind",
+] }
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "concentus_types"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+jiff = { version = "1.0.2", default-features = false, features = ["std"] }
+postcard.workspace = true
+serde.workspace = true
+serde_with = { version = "3.25.0", default-features = false, features = [
+    "macros",
+] }
+url = { version = "2.5.9", features = ["serde"] }
+uuid = { version = "1.29.3", default-features = false, features = ["serde"] }
+[lints]
+workspace = true
