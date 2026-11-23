@@ -1,30 +1,42 @@
-use std::{cmp::Ordering, collections::BTreeMap};
-
-use concentus_types::{FieldFilter, FieldValue, Lookup, PathSegment};
-use serde_value::{Value, to_value};
-use topcoat::Result;
-
 use crate::records::DatabaseRecord;
+use concentus_types::{
+    ExternalIdProvider, FieldFilter, FieldValue, Lookup, LookupOptions, PathSegment, RelatedData,
+    VisualData,
+};
+use serde_value::{Value, to_value};
+use std::{cmp::Ordering, collections::BTreeMap};
+use topcoat::Result;
 
 /// Indexed SQL predicates narrow the candidates. Arbitrary nested field predicates
 /// are evaluated on the hydrated record, so the lookup contract stays independent of table layout.
 #[derive(Default)]
 pub struct SqlLookup {
     predicates: Vec<String>,
-    pub(crate) args: Vec<Option<String>>,
+    pub(crate) args: Vec<String>,
     filters: FilterNode,
-    pub(crate) include_lyrics: bool,
+    pub(crate) options: LookupOptions,
 }
 
 impl SqlLookup {
     pub(crate) fn from_request<T: DatabaseRecord>(
         request: Lookup<T>,
     ) -> Result<Self, &'static str> {
-        if request.options.lyrics && T::NAME != "tracks" {
-            return Err("Lyrics can only be included in a track lookup.");
+        if T::NAME != "albums" && request.options.tracks != RelatedData::Ids {
+            return Err("Tracklist options are only available for album lookups.");
+        }
+        if T::NAME != "tracks"
+            && (request.options.lyrics || request.options.album != RelatedData::Ids)
+        {
+            return Err("Album and lyrics options are only available for track lookups.");
+        }
+        if T::NAME == "tags" && request.options.tags != RelatedData::Ids {
+            return Err("Tag data options are only available for artist, album and track lookups.");
+        }
+        if T::NAME == "tags" && request.options.visuals != VisualData::Full {
+            return Err("Visual options are only available for artist, album and track lookups.");
         }
         let mut lookup = Self {
-            include_lyrics: request.options.lyrics,
+            options: request.options,
             ..Self::default()
         };
         if request.fields.len() + request.external_ids.len() > 64 {
@@ -54,14 +66,14 @@ impl SqlLookup {
         }
         lookup.filters.validate()?;
         if let Some(id) = request.id {
-            let id = lookup.bind(Some(id.to_string()));
+            let id = lookup.bind(id.to_string());
             lookup.predicates.push(format!("record.id = {id}"));
         }
         if let Some(name) = request.artist_name {
             if T::NAME == "artists" {
                 lookup.match_name("name", name);
             } else if let Some(table) = T::CREDIT_TABLE {
-                let name = lookup.bind(Some(name));
+                let name = lookup.bind(name);
                 lookup.predicates.push(format!(
                     "EXISTS (SELECT 1 FROM {table} AS credit
                         JOIN artists AS artist ON artist.id = credit.artist_id
@@ -75,16 +87,11 @@ impl SqlLookup {
         }
         for id in request.external_ids {
             if let Some(table) = T::EXTERNAL_ID_TABLE {
-                let [provider, text, number, name] =
-                    external_parts(to_value(id).map_err(|_| "Invalid external ID.")?)?;
-                let provider = lookup.bind(provider);
-                let text = lookup.bind(text);
-                let number = lookup.bind(number);
-                let name = lookup.bind(name);
+                let provider = lookup.bind(provider_key(id.provider)?);
+                let value = lookup.bind(id.value);
                 lookup.predicates.push(format!(
                     "EXISTS (SELECT 1 FROM {table} AS external WHERE external.owner_id = record.id
-                        AND external.provider = {provider} AND external.value_text IS {text}
-                        AND external.value_number IS {number} AND external.other_name IS {name})"
+                        AND external.provider = {provider} AND external.value = {value})"
                 ));
             } else {
                 lookup.predicates.push("0".into());
@@ -115,42 +122,27 @@ impl SqlLookup {
         Ok(!self.has_field_filters() || self.filters.matches(&to_value(record)?, false))
     }
 
-    fn bind(&mut self, value: Option<String>) -> String {
+    fn bind(&mut self, value: String) -> String {
         self.args.push(value);
         format!("?{}", self.args.len())
     }
 
     fn match_name(&mut self, column: &'static str, value: String) {
-        let value = self.bind(Some(value));
+        let value = self.bind(value);
         self.predicates.push(format!(
             "trim(record.{column}) = trim({value}) COLLATE NOCASE"
         ));
     }
 }
 
-fn external_parts(value: Value) -> Result<[Option<String>; 4], &'static str> {
-    const BAD: &str = "Invalid external ID.";
-    let Value::Map(mut fields) = value else {
-        return Err(BAD);
-    };
-    let Some((Value::String(provider), value)) = fields.pop_first() else {
-        return Err(BAD);
-    };
-    let (text, number, name) = match value {
-        Value::String(value) => (Some(value), None, None),
-        Value::U64(value) => (None, Some(value.to_string()), None),
-        Value::Map(mut fields) => {
-            let Some(Value::String(name)) = fields.remove(&Value::String("name".into())) else {
-                return Err(BAD);
-            };
-            let Some(Value::String(id)) = fields.remove(&Value::String("id".into())) else {
-                return Err(BAD);
-            };
-            (Some(id), None, Some(name))
-        }
-        _ => return Err(BAD),
-    };
-    Ok([Some(provider), text, number, name])
+fn provider_key(provider: ExternalIdProvider) -> Result<String, &'static str> {
+    if let ExternalIdProvider::Other(name) = provider {
+        return Ok(format!("other:{name}"));
+    }
+    match to_value(provider) {
+        Ok(Value::String(name)) => Ok(name),
+        _ => Err("Invalid external ID provider."),
+    }
 }
 
 #[derive(Default)]

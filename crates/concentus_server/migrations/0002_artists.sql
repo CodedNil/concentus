@@ -1,45 +1,81 @@
--- Numeric provider IDs use checked decimal text to preserve the full unsigned 64-bit range.
+CREATE TABLE artists (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    sort_name TEXT,
+    kind TEXT NOT NULL,
+    biography TEXT,
+    begin_date TEXT,
+    end_date TEXT,
+    origin TEXT,
+    theme_light_background TEXT,
+    theme_light_foreground TEXT,
+    theme_light_accent TEXT,
+    theme_dark_background TEXT,
+    theme_dark_foreground TEXT,
+    theme_dark_accent TEXT,
+    theme_font_family TEXT,
+    theme_font_url TEXT
+) STRICT;
+CREATE INDEX artists_name ON artists (trim(name) COLLATE NOCASE);
+
+CREATE TABLE artist_artwork (
+    id INTEGER PRIMARY KEY,
+    owner_id TEXT NOT NULL REFERENCES artists(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+    position INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    blurhash TEXT,
+    explicit INTEGER NOT NULL,
+    UNIQUE (owner_id, position)
+) STRICT;
+
+CREATE TABLE artist_artwork_renditions (
+    owner_id INTEGER NOT NULL REFERENCES artist_artwork(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+    position INTEGER NOT NULL,
+    url TEXT NOT NULL,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    codec TEXT,
+    duration_ms INTEGER,
+    PRIMARY KEY (owner_id, position)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE artist_artwork_colors (
+    owner_id INTEGER NOT NULL REFERENCES artist_artwork(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+    position INTEGER NOT NULL,
+    color TEXT NOT NULL,
+    PRIMARY KEY (owner_id, position)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE artist_members (
     id INTEGER PRIMARY KEY,
     owner_id TEXT NOT NULL REFERENCES artists(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-    position INTEGER NOT NULL CHECK (position >= 0),
+    position INTEGER NOT NULL,
     artist_id TEXT NOT NULL REFERENCES artists(id) DEFERRABLE INITIALLY DEFERRED,
+    joined_date TEXT,
+    left_date TEXT,
     UNIQUE (owner_id, position)
 ) STRICT;
 
 CREATE TABLE member_roles (
     owner_id INTEGER NOT NULL REFERENCES artist_members(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    role TEXT NOT NULL CHECK (role IN ('Primary', 'Performer', 'Vocals', 'BackgroundVocals', 'Instrument', 'Featured', 'Composer', 'Lyricist', 'Writer', 'Arranger', 'Producer', 'ExecutiveProducer', 'Engineer', 'Mixer', 'Mastering', 'Remixer', 'Other')),
+    position INTEGER NOT NULL,
+    role TEXT NOT NULL,
     role_detail TEXT,
-    PRIMARY KEY (owner_id, position),
-    CHECK ((role IN ('Instrument', 'Other')) = (role_detail IS NOT NULL))
+    PRIMARY KEY (owner_id, position)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE artist_tags (
     owner_id TEXT NOT NULL REFERENCES artists(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-    position INTEGER NOT NULL CHECK (position >= 0),
+    position INTEGER NOT NULL,
     tag_id TEXT NOT NULL REFERENCES tags(id) DEFERRABLE INITIALLY DEFERRED,
-    weight INTEGER NOT NULL CHECK (weight BETWEEN 0 AND 100),
+    weight INTEGER NOT NULL,
     PRIMARY KEY (owner_id, position)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE artist_external_ids (
     owner_id TEXT NOT NULL REFERENCES artists(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    provider TEXT NOT NULL CHECK (provider IN ('Musicbrainz', 'Isrc', 'Barcode', 'Wikidata', 'Discogs', 'Genius', 'AppleMusic', 'Deezer', 'Tidal', 'Spotify', 'Amazon', 'YoutubeMusic', 'Isni', 'Ipi', 'Other')),
-    value_text TEXT,
-    value_number TEXT CHECK (length(value_number) BETWEEN 1 AND 20 AND value_number NOT GLOB '*[^0-9]*'
-        AND (value_number = '0' OR substr(value_number, 1, 1) <> '0')
-        AND (length(value_number) < 20 OR value_number <= '18446744073709551615')),
-    other_name TEXT,
-    PRIMARY KEY (owner_id, position),
-    CHECK (
-        (provider IN ('Barcode', 'Wikidata', 'Discogs', 'Genius', 'AppleMusic', 'Deezer', 'Tidal', 'Ipi')
-            AND value_number IS NOT NULL AND value_text IS NULL AND other_name IS NULL)
-        OR (provider IN ('Musicbrainz', 'Isrc', 'Spotify', 'Amazon', 'YoutubeMusic', 'Isni')
-            AND value_number IS NULL AND value_text IS NOT NULL AND other_name IS NULL)
-        OR (provider = 'Other' AND value_number IS NULL AND value_text IS NOT NULL AND other_name IS NOT NULL)
-    )
+    provider TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (owner_id, provider, value)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX artist_external_ids_provider ON artist_external_ids (provider, value_text, value_number, other_name, owner_id);
+CREATE INDEX artist_external_ids_provider ON artist_external_ids (provider, value, owner_id);

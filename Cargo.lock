@@ -260,7 +260,6 @@ dependencies = [
  "postcard",
  "serde",
  "serde_with",
- "url",
  "uuid",
 ]
 
@@ -3114,7 +3113,6 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
- "serde_derive",
 ]
 
 [[package]]

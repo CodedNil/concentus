@@ -1,39 +1,45 @@
 use super::{
-    Artist, Credit, ExternalId, Id, PartialDate, Tag, Track, Visuals, Weighted, primary_artists,
+    Artist, Credit, ExternalIds, Id, PartialDate, RecordRef, Scored, Tag, Track, Visuals,
+    primary_artists,
 };
 use serde::{Deserialize, Serialize};
 
 /// A release; editions (deluxe, remaster, regional) are separate albums linked through `edition`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Album {
     /// Unique ID of this release.
     pub id: Id<Self>,
+    /// The same album in other systems.
+    pub external_ids: ExternalIds,
+
     /// Title without the edition suffix.
     pub title: String,
     /// Title for alphabetical ordering.
     pub sort_title: Option<String>,
     /// Set when this is an edition of another album; `None` for a base album.
     pub edition: Option<Edition>,
-    /// Album, single, EP, compilation and so on.
-    pub kind: AlbumKind,
+    /// The type of release, if known.
+    pub album_type: Option<AlbumType>,
     /// Release date, as precisely as it's known.
     pub release_date: Option<PartialDate>,
+
     /// Discs in order; the disc number is the position in this list.
     pub discs: Vec<Disc>,
     /// Album-level credits in billing order: the primary artists, then any executive producers.
     pub credits: Vec<Credit>,
+
     /// The label that released it.
     pub label: Option<String>,
     /// Copyright line as delivered, e.g. `"℗ 2026 Example Records"`.
     pub copyright: Option<String>,
+
     /// Editorial description.
     pub description: Option<String>,
-    /// Genres, moods and other tags with strengths.
-    pub tags: Vec<Weighted<Tag>>,
+    /// Genres, moods and other weighted tags. Empty when omitted.
+    pub tags: Vec<Scored<RecordRef<Tag>>>,
+
     /// Cover art, motion art and colors.
     pub visuals: Visuals,
-    /// The same album in other systems.
-    pub external_ids: Vec<ExternalId>,
 }
 
 impl Album {
@@ -52,18 +58,23 @@ impl Album {
 
     /// Number of tracks across all discs.
     pub fn track_count(&self) -> usize {
-        self.discs.iter().map(|d| d.track_ids.len()).sum()
+        self.discs.iter().map(|disc| disc.tracks.len()).sum()
     }
 
     /// Every track on the album, disc by disc.
     pub fn track_ids(&self) -> impl Iterator<Item = Id<Track>> + '_ {
-        self.discs.iter().flat_map(|d| d.track_ids.iter().copied())
+        self.discs
+            .iter()
+            .flat_map(|disc| disc.tracks.iter().filter_map(track_id))
     }
 
     /// The `(disc, track)` position of a track, both starting at 1.
     pub fn position(&self, track: Id<Track>) -> Option<(u16, u16)> {
         self.discs.iter().enumerate().find_map(|(d, disc)| {
-            let t = disc.track_ids.iter().position(|id| *id == track)?;
+            let t = disc
+                .tracks
+                .iter()
+                .position(|entry| track_id(entry) == Some(track))?;
             Some((u16::try_from(d + 1).ok()?, u16::try_from(t + 1).ok()?))
         })
     }
@@ -78,35 +89,37 @@ pub struct Edition {
     pub of: Option<Id<Album>>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AlbumKind {
+/// The type of an album or other release.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AlbumType {
     /// A full-length album.
-    #[default]
     Album,
-    /// One or two songs released alone.
+    /// A release designated as a single.
     Single,
-    /// An extended play, longer than a single and shorter than an album.
+    /// A release designated as an extended play.
     Ep,
-    /// A collection of previously released songs, often by several artists.
-    Compilation,
-    /// Music from a film, show or game.
+    /// Music from a film, show, game, or other work.
     Soundtrack {
-        /// Title of the film, show or game it is from.
+        /// The source work's title, if known.
         source: Option<String>,
     },
-    /// Recorded at a live performance.
-    Live,
-    /// Remixes of existing songs.
-    Remix,
-    /// Anything else.
+    /// A release outside the primary categories above.
     Other,
 }
 
 /// One disc of a release. Single-disc releases have exactly one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Disc {
     /// Disc subtitle, e.g. `"Bonus"`.
     pub title: Option<String>,
     /// Tracks in play order. Position in this list is the track number.
-    pub track_ids: Vec<Id<Track>>,
+    pub tracks: Vec<RecordRef<Track>>,
+}
+
+fn track_id(track: &RecordRef<Track>) -> Option<Id<Track>> {
+    match track {
+        RecordRef::None => None,
+        RecordRef::Id(id) => Some(*id),
+        RecordRef::Data(track) => Some(track.id),
+    }
 }

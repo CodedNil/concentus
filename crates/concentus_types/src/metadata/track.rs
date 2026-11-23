@@ -1,50 +1,64 @@
-use std::collections::HashMap;
-
 use super::{
-    Album, Artist, AudioFeatures, Credit, ExternalId, Id, Language, Lyrics, Tag, Visuals, Weighted,
-    primary_artists,
+    Album, Artist, AudioFeatures, Credit, ExternalIds, Id, Language, Lyrics, PartialDate,
+    RecordRef, Scored, Tag, Visuals, primary_artists,
 };
 use serde::{Deserialize, Serialize};
-use url::Url;
+use std::collections::HashMap;
 
-/// A recording; `album_id` names its primary album, whose discs give the track's position.
+/// A recording; its primary album's discs give the track's position.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     /// Unique ID, the same however many albums the recording is on.
     pub id: Id<Self>,
+    /// The same recording in other systems, including its ISRCs.
+    pub external_ids: ExternalIds,
+
     /// Title without the version suffix.
     pub title: String,
-    /// Length of the audio.
-    pub duration_ms: u32,
     /// Version suffix, e.g. `"Live at Wembley"` or `"Remastered 2011"`.
     pub version: Option<String>,
+    /// Length of the audio.
+    pub duration_ms: u32,
+    /// Release date of this track, falling back to its primary album's date in API responses.
+    pub release_date: Option<PartialDate>,
+    /// Whether the track is explicit or a clean edit; `None` if unrated.
+    pub rating: Option<ContentRating>,
+
     /// Everyone involved in billing order: primary and featured artists first, then other roles.
     pub credits: Vec<Credit>,
-    /// The album it primarily appears on.
-    pub album_id: Option<Id<Album>>,
+    /// The primary album, when known and requested.
+    pub album: RecordRef<Album>,
+    /// How this track derives from each source track, in order per source.
+    pub derived_from: HashMap<Id<Self>, Vec<DerivationKind>>,
+
     /// BCP 47 languages of the vocals; more than one for bilingual tracks.
     pub languages: Vec<Language>,
     /// Lyrics by language. API responses populate this only when requested.
     pub lyrics: HashMap<Language, Lyrics>,
-    /// Whether the track is explicit or a clean edit; `None` if unrated.
-    pub rating: Option<ContentRating>,
-    /// Genres, moods and other tags with strengths.
-    pub tags: Vec<Weighted<Tag>>,
+
+    /// Genres, moods and other weighted tags. Empty when omitted.
+    pub tags: Vec<Scored<RecordRef<Tag>>>,
     /// Tempo, key, loudness, danceability, valence, crossfade points and so on.
     pub features: AudioFeatures,
     /// The story behind the song.
     pub about: Option<String>,
-    /// The tracks this one samples, covers or otherwise derives from.
-    pub derived_from: Vec<Derivation>,
-    /// Link to the music video on a video site such as `YouTube`.
-    pub music_video: Option<Url>,
+
     /// Track artwork, canvas and colors.
     pub visuals: Visuals,
-    /// The same recording in other systems, including its ISRCs.
-    pub external_ids: Vec<ExternalId>,
+    /// Link to the music video on a video site such as `YouTube`.
+    pub music_video: Option<String>,
 }
 
 impl Track {
+    /// The primary album ID, whether the response includes the full album or just the ID.
+    pub fn album_id(&self) -> Option<Id<Album>> {
+        match &self.album {
+            RecordRef::None => None,
+            RecordRef::Id(id) => Some(*id),
+            RecordRef::Data(album) => Some(album.id),
+        }
+    }
+
     /// The billed main artists, in billing order.
     pub fn primary_artists(&self) -> impl Iterator<Item = Id<Artist>> + '_ {
         primary_artists(&self.credits)
@@ -59,15 +73,6 @@ pub enum ContentRating {
     PartiallyExplicit,
     /// A censored edit of explicit material.
     Clean,
-}
-
-/// A track another track is derived from, and how.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Derivation {
-    /// The original track.
-    pub track_id: Id<Track>,
-    /// How this track uses it.
-    pub kind: DerivationKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

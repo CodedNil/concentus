@@ -1,14 +1,13 @@
+use directories::ProjectDirs;
+use std::{env, io, path::PathBuf};
+use store::Store;
+
 mod api;
 mod app;
 mod catalog;
 mod lookup;
 mod records;
 mod store;
-
-use std::{env, io, path::PathBuf};
-
-use directories::ProjectDirs;
-use store::Store;
 
 #[tokio::main]
 async fn main() -> topcoat::Result<()> {

@@ -83,7 +83,7 @@ async fn home(cx: &Cx) -> Result<impl View> {
                                         </a>
                                         " · "
                                         <a href="#albums">
-                                            (catalog.album_title(track.album_id).to_owned())
+                                            (catalog.album_title(track.album_id()).to_owned())
                                         </a>
                                     </p>
                                     <dl>

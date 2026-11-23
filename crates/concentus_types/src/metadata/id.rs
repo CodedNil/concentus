@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
-use std::{fmt, marker::PhantomData, str::FromStr};
+use std::{collections::HashMap, fmt, marker::PhantomData, str::FromStr};
 use uuid::Uuid;
 
 /// A typed UUID. Ordering follows the bytes, so v7 IDs sort by creation time.
@@ -106,79 +106,58 @@ pub struct Scored<I> {
 /// A link to an entity with a strength.
 pub type Weighted<T> = Scored<Id<T>>;
 
-/// The same record in another system, with the identifier in that system's native type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ExternalId {
-    /// `MusicBrainz` ID, for any entity.
-    Musicbrainz(Uuid),
-    /// International Standard Recording Code, for a track; a recording can have several.
-    Isrc(Isrc),
-    /// UPC or EAN barcode as a number, for an album; zero-pad to 13 digits to print it.
-    Barcode(u64),
-    /// Wikidata item number, the digits after the `Q`.
-    Wikidata(u64),
-    /// Discogs ID.
-    Discogs(u64),
-    /// Genius ID.
-    Genius(u64),
-    /// Apple Music catalog ID.
-    AppleMusic(u64),
-    /// Deezer ID.
-    Deezer(u64),
-    /// Tidal ID.
-    Tidal(u64),
-    /// Spotify ID, always 22 base62 characters.
-    Spotify(Code<22>),
-    /// Amazon ID (ASIN), always 10 characters.
-    Amazon(Code<10>),
-    /// `YouTube` Music ID.
-    YoutubeMusic(String),
-    /// International Standard Name Identifier, 15 digits and a check character, for an artist.
-    Isni(Code<16>),
-    /// Interested Parties Information number, for an artist who writes.
-    Ipi(u64),
-    /// Any other system.
-    Other {
-        /// Name of the system.
-        name: String,
-        /// The ID in that system.
-        id: String,
-    },
+/// A related record that can be omitted, returned as an ID, or expanded.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecordRef<T> {
+    #[default]
+    None,
+    Id(Id<T>),
+    Data(Box<T>),
 }
 
-/// A fixed-length ASCII code of letters, digits, `-` and `_`, held inline without allocating.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, SerializeDisplay, DeserializeFromStr,
-)]
-pub struct Code<const N: usize>(
-    /// The ASCII bytes.
-    [u8; N],
-);
+/// An identifier in another system. Values are opaque text, even when they contain only digits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ExternalId {
+    pub provider: ExternalIdProvider,
+    pub value: String,
+}
 
-impl<const N: usize> FromStr for Code<N> {
-    type Err = ParseError;
-
-    fn from_str(s: &str) -> Result<Self, ParseError> {
-        let bytes: [u8; N] = s
-            .as_bytes()
-            .try_into()
-            .map_err(|_| ParseError("code has the wrong length"))?;
-        if bytes
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-        {
-            Ok(Self(bytes))
-        } else {
-            Err(ParseError("code has invalid characters"))
+impl ExternalId {
+    pub fn new(provider: ExternalIdProvider, value: impl Into<String>) -> Self {
+        Self {
+            provider,
+            value: value.into(),
         }
     }
 }
 
-impl<const N: usize> fmt::Display for Code<N> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(std::str::from_utf8(&self.0).unwrap_or_default())
+impl From<Isrc> for ExternalId {
+    fn from(isrc: Isrc) -> Self {
+        Self::new(ExternalIdProvider::Isrc, isrc.as_str())
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExternalIdProvider {
+    Musicbrainz,
+    Isrc,
+    Barcode,
+    Wikidata,
+    Discogs,
+    Genius,
+    AppleMusic,
+    Deezer,
+    Tidal,
+    Spotify,
+    Amazon,
+    YoutubeMusic,
+    Isni,
+    Ipi,
+    Other(String),
+}
+
+/// External IDs grouped by provider. A provider can have multiple values for a record.
+pub type ExternalIds = HashMap<ExternalIdProvider, Vec<String>>;
 
 /// International Standard Recording Code, e.g. `USRC17607839`. Stored as 12 ASCII bytes.
 #[derive(

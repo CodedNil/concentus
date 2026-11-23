@@ -33,7 +33,7 @@ impl Catalog {
     pub fn position(&self, track: &Track) -> Option<(u16, u16)> {
         self.albums
             .iter()
-            .find(|a| Some(a.id) == track.album_id)?
+            .find(|a| Some(a.id) == track.album_id())?
             .position(track.id)
     }
 

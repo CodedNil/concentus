@@ -20,6 +20,7 @@ pub struct Channel {
     pub artist_id: Option<Id<Artist>>,
     /// What this channel carries.
     pub kind: ChannelKind,
+
     /// The spans in order; a span ending in a newline ends a line, so joining their text gives the lyrics.
     pub spans: Vec<Span>,
 }
@@ -47,6 +48,7 @@ pub enum ChannelKind {
 pub struct Span {
     /// The sung text, including any trailing space or newline; a word split in two has no space between its spans.
     pub text: String,
+
     /// When this span starts, from the start of the track; `None` for untimed lyrics.
     pub start_ms: Option<u32>,
     /// When this span ends; if missing, players use the next span's start.

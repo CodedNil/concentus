@@ -6,12 +6,14 @@ use serde::{Deserialize, Serialize};
 pub struct Tag {
     /// Unique ID.
     pub id: Id<Self>,
+
     /// Display name.
     pub name: String,
     /// Whether this is a genre, an emotion or an activity.
     pub kind: TagKind,
     /// Other names for the same tag.
     pub aliases: Vec<String>,
+
     /// The broader tag this one belongs to; mostly used to arrange genres as a tree.
     pub parent: Option<Id<Self>>,
 }

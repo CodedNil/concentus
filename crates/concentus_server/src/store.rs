@@ -1,11 +1,14 @@
-use std::path::Path;
-
-use crate::{catalog::Catalog, lookup::SqlLookup, records::DatabaseRecord};
+use crate::{
+    catalog::Catalog,
+    lookup::SqlLookup,
+    records::{DatabaseRecord, read_by_id},
+};
 use sqlx::{
     AssertSqlSafe, Row, Sqlite, SqlitePool,
     migrate::Migrator,
     sqlite::{SqliteConnectOptions, SqliteJournalMode},
 };
+use std::path::Path;
 use topcoat::{
     Result,
     context::{Cx, context},
@@ -38,8 +41,9 @@ impl Store {
         let cursor_param = lookup.args.len() + 1;
         let limit_param = cursor_param + 1;
         let sql = format!(
-            "SELECT record.* FROM {} AS record WHERE ({predicate}) AND id > ?{cursor_param}
+            "SELECT {} FROM {} AS record WHERE ({predicate}) AND id > ?{cursor_param}
                 ORDER BY id LIMIT ?{limit_param}",
+            T::COLUMNS,
             T::NAME
         );
         let mut db = self.0.begin().await?;
@@ -56,7 +60,7 @@ impl Store {
             // The table and predicate shape are selected by the server; values are bound.
             let mut query = sqlx::query::<Sqlite>(AssertSqlSafe(sql.as_str()));
             for arg in &lookup.args {
-                query = query.bind(arg.as_deref());
+                query = query.bind(arg.as_str());
             }
             let rows = query
                 .bind(cursor.as_str())
@@ -82,11 +86,12 @@ impl Store {
             }
             if !full {
                 if let Some(record) = &mut found {
-                    match (lookup.include_lyrics, lyrics_filter) {
+                    match (lookup.options.lyrics, lyrics_filter) {
                         (true, false) => record.load_lyrics(&mut db).await?,
                         (false, true) => record.omit_lyrics(),
                         _ => {}
                     }
+                    record.select_relations(&mut db, lookup.options).await?;
                 }
                 db.commit().await?;
                 return Ok(found);
@@ -104,7 +109,11 @@ impl Store {
         limit: u32,
         include_lyrics: bool,
     ) -> Result<Vec<T>> {
-        let sql = format!("SELECT * FROM {} WHERE id > ? ORDER BY id LIMIT ?", T::NAME);
+        let sql = format!(
+            "SELECT {} FROM {} AS record WHERE id > ? ORDER BY id LIMIT ?",
+            T::COLUMNS,
+            T::NAME
+        );
         let mut db = self.0.begin().await?;
         let rows = sqlx::query::<Sqlite>(AssertSqlSafe(sql))
             .bind(after.unwrap_or_default())
@@ -124,16 +133,8 @@ impl Store {
     }
 
     pub async fn get<T: DatabaseRecord>(&self, id: &str) -> Result<Option<T>> {
-        let sql = format!("SELECT * FROM {} WHERE id = ?", T::NAME);
         let mut db = self.0.begin().await?;
-        let row = sqlx::query::<Sqlite>(AssertSqlSafe(sql))
-            .bind(id)
-            .fetch_optional(&mut *db)
-            .await?;
-        let record = match row {
-            Some(row) => Some(T::read(&mut db, row).await?),
-            None => None,
-        };
+        let record = read_by_id(&mut db, id).await?;
         db.commit().await?;
         Ok(record)
     }

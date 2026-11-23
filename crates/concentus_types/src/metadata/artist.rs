@@ -1,4 +1,4 @@
-use super::{ExternalId, Id, PartialDate, Role, Tag, Visuals, Weighted};
+use super::{ExternalIds, Font, Id, PartialDate, RecordRef, Role, Scored, Tag, Visuals};
 use serde::{Deserialize, Serialize};
 
 /// A person, group or other credited act, with its page decorated through `visuals`.
@@ -6,26 +6,32 @@ use serde::{Deserialize, Serialize};
 pub struct Artist {
     /// Unique ID.
     pub id: Id<Self>,
+    /// The same artist in other systems.
+    pub external_ids: ExternalIds,
+
     /// Display name.
     pub name: String,
     /// Name for alphabetical ordering, e.g. `"Beatles, The"`.
     pub sort_name: Option<String>,
     /// Person or group; groups carry their members.
     pub kind: ArtistKind,
-    /// Biography.
-    pub biography: Option<String>,
+
+    /// Where the artist is from, e.g. `"London, England"`.
+    pub origin: Option<String>,
     /// Born or formed.
     pub begin: Option<PartialDate>,
     /// Died or disbanded.
     pub end: Option<PartialDate>,
-    /// Where the artist is from, e.g. `"London, England"`.
-    pub origin: Option<String>,
-    /// Genres, moods and other tags with strengths.
-    pub tags: Vec<Weighted<Tag>>,
-    /// Portraits, banners, logos, motion header, colors and fonts.
+
+    /// Biography.
+    pub biography: Option<String>,
+    /// Genres, moods and other weighted tags. Empty when omitted.
+    pub tags: Vec<Scored<RecordRef<Tag>>>,
+
+    /// Portraits, banners, logos, motion header and colors.
     pub visuals: Visuals,
-    /// The same artist in other systems.
-    pub external_ids: Vec<ExternalId>,
+    /// Custom font for the artist's name and page headings.
+    pub font: Option<Box<Font>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,4 +55,9 @@ pub struct Membership {
     pub artist_id: Id<Artist>,
     /// What they did in the group, e.g. an instrument.
     pub roles: Vec<Role>,
+
+    /// When the member joined the group, if known.
+    pub joined: Option<PartialDate>,
+    /// When the member left the group, if known.
+    pub left: Option<PartialDate>,
 }

@@ -1,5 +1,9 @@
-pub mod metadata;
-pub mod protocol;
-
+pub use collection::Collection;
+pub use http::*;
+pub use lookup::*;
 pub use metadata::*;
-pub use protocol::*;
+
+pub mod collection;
+pub mod http;
+pub mod lookup;
+pub mod metadata;

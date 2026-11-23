@@ -1,16 +1,17 @@
 //! Maps normalized SQLite rows to the shared metadata types.
-use std::{collections::HashMap, future::Future, str::FromStr};
-
 use concentus_types::{
-    Album, AlbumKind, Artist, ArtistKind, Artwork, AudioFeatures, Channel, Collection, Credit,
-    Derivation, DerivationKind, Disc, Edition, ExternalId, Font, Lyrics, Membership, Rendition,
-    Role, Scheme, Span, Tag, Theme, TimeRange, Track, Visuals, Weighted,
+    Album, AlbumType, Artist, ArtistKind, Artwork, ArtworkKind, AudioFeatures, Channel, Collection,
+    Credit, DerivationKind, Disc, Edition, ExternalIdProvider, ExternalIds, Font, Id,
+    LookupOptions, Lyrics, Membership, RecordRef, RelatedData, Rendition, Role, Scheme, Scored,
+    Span, Tag, Theme, TimeRange, Track, VisualData, Visuals,
 };
 use serde::de::{DeserializeOwned, value::StrDeserializer};
 use sqlx::{AssertSqlSafe, Row, Sqlite, SqliteConnection, query, sqlite::SqliteRow};
+use std::{collections::HashMap, future::Future, str::FromStr};
 use topcoat::{Error, Result};
 
 pub trait DatabaseRecord: Collection + Send {
+    const COLUMNS: &'static str = "record.*";
     const CREDIT_TABLE: Option<&'static str> = None;
     const EXTERNAL_ID_TABLE: Option<&'static str> = None;
 
@@ -25,6 +26,33 @@ pub trait DatabaseRecord: Collection + Send {
     }
 
     fn omit_lyrics(&mut self) {}
+
+    fn select_relations(
+        &mut self,
+        _db: &mut SqliteConnection,
+        _options: LookupOptions,
+    ) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
+}
+
+pub async fn read_by_id<T: DatabaseRecord>(
+    db: &mut SqliteConnection,
+    id: &str,
+) -> Result<Option<T>> {
+    let sql = format!(
+        "SELECT {} FROM {} AS record WHERE id = ?",
+        T::COLUMNS,
+        T::NAME
+    );
+    let row = query(AssertSqlSafe(sql))
+        .bind(id)
+        .fetch_optional(&mut *db)
+        .await?;
+    match row {
+        Some(row) => Ok(Some(T::read(db, row).await?)),
+        None => Ok(None),
+    }
 }
 
 impl DatabaseRecord for Artist {
@@ -46,6 +74,8 @@ impl DatabaseRecord for Artist {
                             role,
                         )
                         .await?,
+                        joined: optional_parse(&member, "joined_date")?,
+                        left: optional_parse(&member, "left_date")?,
                     });
                 }
                 ArtistKind::Group { members }
@@ -53,19 +83,49 @@ impl DatabaseRecord for Artist {
             "Unknown" => ArtistKind::Unknown,
             _ => return Err(Error::msg("Invalid artist kind")),
         };
+        let font = match (
+            row.try_get("theme_font_family")?,
+            row.try_get("theme_font_url")?,
+        ) {
+            (Some(family), Some(url)) => Some(Box::new(Font { family, url })),
+            (None, None) => None,
+            _ => return Err(Error::msg("An artist font needs both a family and a URL")),
+        };
         Ok(Self {
             id: parse(&row, "id")?,
             name: row.try_get("name")?,
             sort_name: row.try_get("sort_name")?,
             kind,
             biography: row.try_get("biography")?,
-            begin: optional_parse(&row, "begin")?,
-            end: optional_parse(&row, "end")?,
+            begin: optional_parse(&row, "begin_date")?,
+            end: optional_parse(&row, "end_date")?,
             origin: row.try_get("origin")?,
             tags: ordered(db, "artist_tags", owner, weighted_tag).await?,
-            visuals: visuals(db, row.try_get("visuals_id")?).await?,
-            external_ids: ordered(db, "artist_external_ids", owner, external_id).await?,
+            visuals: visuals(
+                db,
+                &row,
+                [
+                    "artist_artwork",
+                    "artist_artwork_renditions",
+                    "artist_artwork_colors",
+                ],
+            )
+            .await?,
+            font,
+            external_ids: external_ids(db, "artist_external_ids", row.try_get("id")?).await?,
         })
+    }
+
+    async fn select_relations(
+        &mut self,
+        db: &mut SqliteConnection,
+        options: LookupOptions,
+    ) -> Result<()> {
+        select_visuals(&mut self.visuals, options.visuals, ArtworkKind::Portrait);
+        if options.visuals != VisualData::Full {
+            self.font = None;
+        }
+        select_tags(db, &mut self.tags, options.tags).await
     }
 }
 
@@ -82,18 +142,21 @@ impl DatabaseRecord for Album {
             }),
             None => None,
         };
-        let kind = match row.try_get::<&str, _>("kind")? {
-            "Soundtrack" => AlbumKind::Soundtrack {
-                source: row.try_get("soundtrack_source")?,
-            },
-            kind => unit_enum(kind)?,
+        let album_type = match (
+            row.try_get::<Option<&str>, _>("album_type")?,
+            row.try_get("soundtrack_source")?,
+        ) {
+            (Some("Soundtrack"), source) => Some(AlbumType::Soundtrack { source }),
+            (_, Some(_)) => return Err(Error::msg("Only soundtracks can have a source title")),
+            (Some(name), None) => Some(unit_enum(name)?),
+            (None, None) => None,
         };
         let mut discs = Vec::new();
         for disc in children(db, "album_discs", owner).await? {
             discs.push(Disc {
                 title: disc.try_get("title")?,
-                track_ids: ordered(db, "disc_tracks", Key::Number(disc.try_get("id")?), |row| {
-                    parse(row, "track_id")
+                tracks: ordered(db, "disc_tracks", Key::Number(disc.try_get("id")?), |row| {
+                    Ok(RecordRef::Id(parse(row, "track_id")?))
                 })
                 .await?,
             });
@@ -103,7 +166,7 @@ impl DatabaseRecord for Album {
             title: row.try_get("title")?,
             sort_title: row.try_get("sort_title")?,
             edition,
-            kind,
+            album_type,
             release_date: optional_parse(&row, "release_date")?,
             discs,
             credits: ordered(db, "album_credits", owner, credit).await?,
@@ -111,25 +174,69 @@ impl DatabaseRecord for Album {
             copyright: row.try_get("copyright")?,
             description: row.try_get("description")?,
             tags: ordered(db, "album_tags", owner, weighted_tag).await?,
-            visuals: visuals(db, row.try_get("visuals_id")?).await?,
-            external_ids: ordered(db, "album_external_ids", owner, external_id).await?,
+            visuals: visuals(
+                db,
+                &row,
+                [
+                    "album_artwork",
+                    "album_artwork_renditions",
+                    "album_artwork_colors",
+                ],
+            )
+            .await?,
+            external_ids: external_ids(db, "album_external_ids", row.try_get("id")?).await?,
         })
+    }
+
+    async fn select_relations(
+        &mut self,
+        db: &mut SqliteConnection,
+        options: LookupOptions,
+    ) -> Result<()> {
+        select_visuals(&mut self.visuals, options.visuals, ArtworkKind::Cover);
+        select_tags(db, &mut self.tags, options.tags).await?;
+        match options.tracks {
+            RelatedData::None => self.discs.clear(),
+            RelatedData::Ids => {}
+            RelatedData::Full => {
+                for entry in self.discs.iter_mut().flat_map(|disc| &mut disc.tracks) {
+                    if let RecordRef::Id(id) = entry {
+                        let mut track: Track = read_by_id(db, &id.to_string())
+                            .await?
+                            .ok_or_else(|| Error::msg("Album references a missing track"))?;
+                        select_visuals(&mut track.visuals, options.visuals, ArtworkKind::Cover);
+                        *entry = RecordRef::Data(Box::new(track));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
 impl DatabaseRecord for Track {
+    const COLUMNS: &'static str = "record.*, COALESCE(record.release_date,
+        (SELECT release_date FROM albums WHERE id = record.album_id)) AS effective_release_date";
     const CREDIT_TABLE: Option<&'static str> = Some("track_credits");
     const EXTERNAL_ID_TABLE: Option<&'static str> = Some("track_external_ids");
 
     async fn read(db: &mut SqliteConnection, row: SqliteRow) -> Result<Self> {
         let owner = Key::Text(row.try_get("id")?);
+        let mut derived_from = HashMap::<Id<Self>, Vec<DerivationKind>>::new();
+        for row in children(db, "track_derivations", owner).await? {
+            derived_from
+                .entry(parse(&row, "track_id")?)
+                .or_default()
+                .push(derivation_kind(&row)?);
+        }
         Ok(Self {
             id: parse(&row, "id")?,
             title: row.try_get("title")?,
             duration_ms: row.try_get("duration_ms")?,
             version: row.try_get("version")?,
             credits: ordered(db, "track_credits", owner, credit).await?,
-            album_id: optional_parse(&row, "album_id")?,
+            album: optional_parse(&row, "album_id")?.map_or(RecordRef::None, RecordRef::Id),
+            release_date: optional_parse(&row, "effective_release_date")?,
             languages: ordered(db, "track_languages", owner, |row| {
                 Ok(row.try_get("language")?)
             })
@@ -153,12 +260,44 @@ impl DatabaseRecord for Track {
                 valence: row.try_get("valence")?,
             },
             about: row.try_get("about")?,
-            derived_from: ordered(db, "track_derivations", owner, derivation).await?,
-            music_video: optional_parse(&row, "music_video")?,
-            visuals: visuals(db, row.try_get("visuals_id")?).await?,
-            external_ids: ordered(db, "track_external_ids", owner, external_id).await?,
+            derived_from,
+            music_video: row.try_get("music_video")?,
+            visuals: visuals(
+                db,
+                &row,
+                [
+                    "track_artwork",
+                    "track_artwork_renditions",
+                    "track_artwork_colors",
+                ],
+            )
+            .await?,
+            external_ids: external_ids(db, "track_external_ids", row.try_get("id")?).await?,
         })
     }
+
+    async fn select_relations(
+        &mut self,
+        db: &mut SqliteConnection,
+        options: LookupOptions,
+    ) -> Result<()> {
+        match options.album {
+            RelatedData::None => self.album = RecordRef::None,
+            RelatedData::Ids => {}
+            RelatedData::Full => {
+                if let RecordRef::Id(id) = &self.album {
+                    let mut album: Album = read_by_id(db, &id.to_string())
+                        .await?
+                        .ok_or_else(|| Error::msg("Track references a missing album"))?;
+                    select_visuals(&mut album.visuals, options.visuals, ArtworkKind::Cover);
+                    self.album = RecordRef::Data(Box::new(album));
+                }
+            }
+        }
+        select_visuals(&mut self.visuals, options.visuals, ArtworkKind::Cover);
+        select_tags(db, &mut self.tags, options.tags).await
+    }
+
     async fn load_lyrics(&mut self, db: &mut SqliteConnection) -> Result<()> {
         let track_id = self.id.to_string();
         let rows = query("SELECT language, instrumental FROM track_lyrics WHERE track_id = ?")
@@ -218,21 +357,46 @@ fn credit(row: &SqliteRow) -> Result<Credit> {
 }
 
 fn role(row: &SqliteRow) -> Result<Role> {
-    match row.try_get::<&str, _>("role")? {
-        "Instrument" => Ok(Role::Instrument(row.try_get("role_detail")?)),
-        "Other" => Ok(Role::Other(row.try_get("role_detail")?)),
-        name => unit_enum(name),
+    match (row.try_get::<&str, _>("role")?, row.try_get("role_detail")?) {
+        ("Instrument", Some(detail)) => Ok(Role::Instrument(detail)),
+        ("Other", Some(detail)) => Ok(Role::Other(detail)),
+        ("Instrument" | "Other", None) | (_, Some(_)) => {
+            Err(Error::msg("Invalid credit role detail"))
+        }
+        (name, None) => unit_enum(name),
     }
 }
 
-fn weighted_tag(row: &SqliteRow) -> Result<Weighted<Tag>> {
-    Ok(Weighted {
-        id: parse(row, "tag_id")?,
+fn weighted_tag(row: &SqliteRow) -> Result<Scored<RecordRef<Tag>>> {
+    Ok(Scored {
+        id: RecordRef::Id(parse(row, "tag_id")?),
         weight: row.try_get("weight")?,
     })
 }
 
-fn derivation(row: &SqliteRow) -> Result<Derivation> {
+async fn select_tags(
+    db: &mut SqliteConnection,
+    tags: &mut Vec<Scored<RecordRef<Tag>>>,
+    mode: RelatedData,
+) -> Result<()> {
+    match mode {
+        RelatedData::None => tags.clear(),
+        RelatedData::Ids => {}
+        RelatedData::Full => {
+            for tag in tags {
+                if let RecordRef::Id(id) = &tag.id {
+                    let record = read_by_id(db, &id.to_string())
+                        .await?
+                        .ok_or_else(|| Error::msg("Record references a missing tag"))?;
+                    tag.id = RecordRef::Data(Box::new(record));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn derivation_kind(row: &SqliteRow) -> Result<DerivationKind> {
     let range = |start, end| -> Result<Option<TimeRange>> {
         Ok(match row.try_get(start)? {
             Some(start_ms) => Some(TimeRange {
@@ -242,59 +406,71 @@ fn derivation(row: &SqliteRow) -> Result<Derivation> {
             None => None,
         })
     };
+    let from_range = range("from_start_ms", "from_end_ms")?;
+    let to_range = range("to_start_ms", "to_end_ms")?;
     let kind = match row.try_get::<&str, _>("kind")? {
         "Sample" => DerivationKind::Sample {
-            from_range: range("from_start_ms", "from_end_ms")?,
-            to_range: range("to_start_ms", "to_end_ms")?,
+            from_range,
+            to_range,
         },
-        name => unit_enum(name)?,
+        name if from_range.is_none() && to_range.is_none() => unit_enum(name)?,
+        _ => return Err(Error::msg("Only sample derivations can have time ranges")),
     };
-    Ok(Derivation {
-        track_id: parse(row, "track_id")?,
-        kind,
-    })
+    Ok(kind)
 }
 
-fn external_id(row: &SqliteRow) -> Result<ExternalId> {
-    Ok(match row.try_get::<&str, _>("provider")? {
-        "Musicbrainz" => ExternalId::Musicbrainz(parse(row, "value_text")?),
-        "Isrc" => ExternalId::Isrc(parse(row, "value_text")?),
-        "Barcode" => ExternalId::Barcode(parse(row, "value_number")?),
-        "Wikidata" => ExternalId::Wikidata(parse(row, "value_number")?),
-        "Discogs" => ExternalId::Discogs(parse(row, "value_number")?),
-        "Genius" => ExternalId::Genius(parse(row, "value_number")?),
-        "AppleMusic" => ExternalId::AppleMusic(parse(row, "value_number")?),
-        "Deezer" => ExternalId::Deezer(parse(row, "value_number")?),
-        "Tidal" => ExternalId::Tidal(parse(row, "value_number")?),
-        "Spotify" => ExternalId::Spotify(parse(row, "value_text")?),
-        "Amazon" => ExternalId::Amazon(parse(row, "value_text")?),
-        "YoutubeMusic" => ExternalId::YoutubeMusic(row.try_get("value_text")?),
-        "Isni" => ExternalId::Isni(parse(row, "value_text")?),
-        "Ipi" => ExternalId::Ipi(parse(row, "value_number")?),
-        "Other" => ExternalId::Other {
-            name: row.try_get("other_name")?,
-            id: row.try_get("value_text")?,
-        },
-        _ => return Err(Error::msg("Invalid external ID provider")),
-    })
+async fn external_ids(
+    db: &mut SqliteConnection,
+    table: &'static str,
+    owner: &str,
+) -> Result<ExternalIds> {
+    // The table is a literal selected by the record loader.
+    let sql =
+        format!("SELECT provider, value FROM {table} WHERE owner_id = ? ORDER BY provider, value");
+    let mut ids = ExternalIds::new();
+    for row in query(AssertSqlSafe(sql)).bind(owner).fetch_all(db).await? {
+        let label: &str = row.try_get("provider")?;
+        let provider = match label.strip_prefix("other:") {
+            Some(name) => ExternalIdProvider::Other(name.to_owned()),
+            None => unit_enum(label)?,
+        };
+        ids.entry(provider).or_default().push(row.try_get("value")?);
+    }
+    Ok(ids)
 }
 
-async fn visuals(db: &mut SqliteConnection, id: Option<i64>) -> Result<Visuals> {
-    let Some(id) = id else {
-        return Ok(Visuals::default());
-    };
-    let row = query("SELECT light_scheme_id, dark_scheme_id, font_id FROM visuals WHERE id = ?")
-        .bind(id)
-        .fetch_one(&mut *db)
-        .await?;
+fn select_visuals(visuals: &mut Visuals, mode: VisualData, primary: ArtworkKind) {
+    match mode {
+        VisualData::Full => {}
+        VisualData::None => *visuals = Visuals::default(),
+        VisualData::Primary => {
+            let index = visuals
+                .artwork
+                .iter()
+                .enumerate()
+                .filter(|(_, art)| art.kind == primary)
+                .min_by_key(|(_, art)| art.explicit)
+                .map(|(index, _)| index);
+            visuals.artwork =
+                index.map_or_else(Vec::new, |index| vec![visuals.artwork.swap_remove(index)]);
+            visuals.theme = Theme::default();
+        }
+    }
+}
+
+async fn visuals(
+    db: &mut SqliteConnection,
+    row: &SqliteRow,
+    [artwork_table, renditions, colors]: [&'static str; 3],
+) -> Result<Visuals> {
     let mut artwork = Vec::new();
-    for art in children(db, "artwork", Key::Number(id)).await? {
+    for art in children(db, artwork_table, Key::Text(row.try_get("id")?)).await? {
         let owner = Key::Number(art.try_get("id")?);
         artwork.push(Artwork {
             kind: unit_enum(art.try_get("kind")?)?,
-            files: ordered(db, "artwork_renditions", owner, |row| {
+            files: ordered(db, renditions, owner, |row| {
                 Ok(Rendition {
-                    url: parse(row, "url")?,
+                    url: row.try_get("url")?,
                     width: row.try_get("width")?,
                     height: row.try_get("height")?,
                     codec: row.try_get("codec")?,
@@ -302,47 +478,50 @@ async fn visuals(db: &mut SqliteConnection, id: Option<i64>) -> Result<Visuals> 
                 })
             })
             .await?,
-            colors: ordered(db, "artwork_colors", owner, |row| parse(row, "color")).await?,
+            colors: ordered(db, colors, owner, |row| parse(row, "color")).await?,
             blurhash: art.try_get("blurhash")?,
             explicit: art.try_get("explicit")?,
         });
     }
-    let font = match row.try_get::<Option<i64>, _>("font_id")? {
-        Some(font_id) => {
-            let font = query("SELECT family, url FROM fonts WHERE id = ?")
-                .bind(font_id)
-                .fetch_one(&mut *db)
-                .await?;
-            Some(Font {
-                family: font.try_get("family")?,
-                url: parse(&font, "url")?,
-            })
-        }
-        None => None,
-    };
     Ok(Visuals {
         artwork,
         theme: Theme {
-            light: scheme(db, row.try_get("light_scheme_id")?).await?,
-            dark: scheme(db, row.try_get("dark_scheme_id")?).await?,
-            font,
+            light: scheme(
+                row,
+                [
+                    "theme_light_background",
+                    "theme_light_foreground",
+                    "theme_light_accent",
+                ],
+            )?,
+            dark: scheme(
+                row,
+                [
+                    "theme_dark_background",
+                    "theme_dark_foreground",
+                    "theme_dark_accent",
+                ],
+            )?,
         },
     })
 }
 
-async fn scheme(db: &mut SqliteConnection, id: Option<i64>) -> Result<Option<Scheme>> {
-    let Some(id) = id else {
-        return Ok(None);
-    };
-    let row = query("SELECT background, foreground, accent FROM schemes WHERE id = ?")
-        .bind(id)
-        .fetch_one(db)
-        .await?;
-    Ok(Some(Scheme {
-        background: parse(&row, "background")?,
-        foreground: parse(&row, "foreground")?,
-        accent: parse(&row, "accent")?,
-    }))
+fn scheme(row: &SqliteRow, [background, foreground, accent]: [&str; 3]) -> Result<Option<Scheme>> {
+    match (
+        optional_parse(row, background)?,
+        optional_parse(row, foreground)?,
+        optional_parse(row, accent)?,
+    ) {
+        (Some(background), Some(foreground), Some(accent)) => Ok(Some(Scheme {
+            background,
+            foreground,
+            accent,
+        })),
+        (None, None, None) => Ok(None),
+        _ => Err(Error::msg(
+            "A theme scheme needs background, foreground, and accent colors",
+        )),
+    }
 }
 
 #[derive(Clone, Copy)]

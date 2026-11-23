@@ -2,14 +2,13 @@ use super::ParseError;
 use serde::{Deserialize, Serialize};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use std::{fmt, str::FromStr};
-use url::Url;
 
 /// Everything visual about an entity.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Visuals {
     /// Covers, portraits, banners, logos and animated loops.
     pub artwork: Vec<Artwork>,
-    /// Colors and font for the entity's page.
+    /// Colors for the entity's page.
     pub theme: Theme,
 }
 
@@ -29,14 +28,16 @@ impl Visuals {
 pub struct Artwork {
     /// What the artwork shows.
     pub kind: ArtworkKind,
+    /// True if the artwork itself is explicit; a clean alternate may exist.
+    pub explicit: bool,
+
     /// The same artwork at different sizes; video renditions make it animated.
     pub files: Vec<Rendition>,
+
     /// Prominent colors for theming, most prominent first.
     pub colors: Vec<Rgb>,
     /// Compact placeholder to show while loading.
     pub blurhash: Option<String>,
-    /// True if the artwork itself is explicit; a clean alternate may exist.
-    pub explicit: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,26 +60,26 @@ pub enum ArtworkKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rendition {
     /// Where the file is served from.
-    pub url: Url,
+    pub url: String,
+
     /// Width in pixels.
     pub width: u16,
     /// Height in pixels.
     pub height: u16,
+
     /// Codec string for video, e.g. `hvc1`, `avc1`, `av01`.
     pub codec: Option<String>,
     /// Length of one loop; only set for video.
     pub duration_ms: Option<u32>,
 }
 
-/// How a page for this entity should look: per-artist colors and font.
+/// Page colors for light and dark appearances.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Theme {
     /// Colors for light mode.
     pub light: Option<Scheme>,
     /// Colors for dark mode.
     pub dark: Option<Scheme>,
-    /// Font for the name and headings.
-    pub font: Option<Font>,
 }
 
 /// A complete set of UI colors for one appearance (light or dark).
@@ -131,5 +132,5 @@ pub struct Font {
     /// Font family name, as used in CSS.
     pub family: String,
     /// Where the woff2 file is served from.
-    pub url: Url,
+    pub url: String,
 }
