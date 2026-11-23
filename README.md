@@ -53,6 +53,8 @@ portrait or cover with its renditions. `VisualData::None` omits artwork and styl
 `VisualData::Full` is the default and includes all artwork and colors, plus the
 artist's custom font if present. The same visual mode applies to an album embedded
 in a track response. As with tag options, this only affects the response.
+Visual field filters use the top-level `artwork`, artist or album `theme`, and
+artist `font` fields. Artists and albums have one optional color scheme.
 
 Album lookups support `with_tracks(RelatedData::None)` to omit the disc list,
 `Ids` for track IDs in disc and play order (the default), and `Full` for track
@@ -81,7 +83,25 @@ HTTP bodies use `application/vnd.concentus.postcard`. Both sides send
 `concentus_types` when the binary layout changes and release the client and server together. The server
 returns HTTP 409 for a missing or mismatched revision.
 
-Run `just dev` or `cargo run --locked -p concentus_server` from the workspace root.
+Run `just dev` from the workspace root. It uses `topcoat dev -p concentus_server`
+to watch for changes and print the Web UI address when the server is ready.
+For a standalone run, use `cargo run --locked -p concentus_server`.
+
+The Web UI searches the local catalog first. On an empty artist, album, or track
+search, it queries the keyless MusicBrainz API and saves the returned music
+metadata and relationships in SQLite. The results page opens immediately and
+streams matches as each collection is imported. Album tracklists fill in after
+release details arrive. For an artist and title together, enter
+`Artist - Title`. Album results are imported per release and include ordered
+discs and tracks when MusicBrainz supplies a tracklist. Imported IDs are reused
+on later searches. The optional `CONCENTUS_MUSICBRAINZ_ENDPOINT` selects a
+MusicBrainz-compatible API endpoint for a mirror or local development.
+
+Album and track covers try the Cover Art Archive by release and then by release
+group when available. Artist portraits use locally stored artwork.
+
+The Postcard lookup API currently reads the local catalog. Imported records are
+immediately available to it.
 The server listens on `127.0.0.1:3000` by default. Set `HOST` or `PORT` to override it.
 
 On Linux, the database lives at `$XDG_STATE_HOME/concentus/catalog.sqlite3`, defaulting
@@ -96,7 +116,8 @@ indexed by provider and value. For SQL imports, use enum labels like `AppleMusic
 ID values are exact text. Dates use `YYYY`, `YYYY-MM`, or `YYYY-MM-DD` text and
 are parsed by the same Rust `PartialDate` type for artists, albums, and tracks.
 
-Tracks, albums, and artists own their theme columns and artwork rows. Tags have their
+Tracks, albums, and artists own their artwork rows. Albums and artists own their
+theme columns. Tags have their
 own records so their IDs can be shared across the catalog.
 
 For imports with references between albums and tracks, enable SQLite foreign keys and

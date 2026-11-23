@@ -1,6 +1,6 @@
 use super::{
-    Album, Artist, AudioFeatures, Credit, ExternalIds, Id, Language, Lyrics, PartialDate,
-    RecordRef, Scored, Tag, Visuals, primary_artists,
+    Album, Artist, Artwork, ArtworkKind, AudioFeatures, Credit, ExternalIds, Id, Language, Lyrics,
+    PartialDate, RecordRef, Scored, Tag, primary_artists,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,13 +43,18 @@ pub struct Track {
     /// The story behind the song.
     pub about: Option<String>,
 
-    /// Track artwork, canvas and colors.
-    pub visuals: Visuals,
+    /// Track artwork and canvas loops.
+    pub artwork: Vec<Artwork>,
     /// Link to the music video on a video site such as `YouTube`.
     pub music_video: Option<String>,
 }
 
 impl Track {
+    /// The track's own cover, preferring one that isn't explicit.
+    pub fn cover(&self) -> Option<&Artwork> {
+        Artwork::preferred(&self.artwork, ArtworkKind::Cover)
+    }
+
     /// The primary album ID, whether the response includes the full album or just the ID.
     pub fn album_id(&self) -> Option<Id<Album>> {
         match &self.album {

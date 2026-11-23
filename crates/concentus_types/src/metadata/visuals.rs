@@ -3,26 +3,6 @@ use serde::{Deserialize, Serialize};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use std::{fmt, str::FromStr};
 
-/// Everything visual about an entity.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Visuals {
-    /// Covers, portraits, banners, logos and animated loops.
-    pub artwork: Vec<Artwork>,
-    /// Colors for the entity's page.
-    pub theme: Theme,
-}
-
-impl Visuals {
-    /// The front cover, preferring one that isn't explicit.
-    pub fn cover(&self) -> Option<&Artwork> {
-        let mut covers = self.artwork.iter().filter(|a| a.kind == ArtworkKind::Cover);
-        covers
-            .clone()
-            .find(|a| !a.explicit)
-            .or_else(|| covers.next())
-    }
-}
-
 /// One piece of artwork in every size and format available, still or animated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Artwork {
@@ -38,6 +18,15 @@ pub struct Artwork {
     pub colors: Vec<Rgb>,
     /// Compact placeholder to show while loading.
     pub blurhash: Option<String>,
+}
+
+impl Artwork {
+    pub(super) fn preferred(artwork: &[Self], kind: ArtworkKind) -> Option<&Self> {
+        artwork
+            .iter()
+            .filter(|art| art.kind == kind)
+            .min_by_key(|art| art.explicit)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,15 +60,6 @@ pub struct Rendition {
     pub codec: Option<String>,
     /// Length of one loop; only set for video.
     pub duration_ms: Option<u32>,
-}
-
-/// Page colors for light and dark appearances.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Theme {
-    /// Colors for light mode.
-    pub light: Option<Scheme>,
-    /// Colors for dark mode.
-    pub dark: Option<Scheme>,
 }
 
 /// A complete set of UI colors for one appearance (light or dark).

@@ -1,4 +1,6 @@
-use super::{ExternalIds, Font, Id, PartialDate, RecordRef, Role, Scored, Tag, Visuals};
+use super::{
+    Artwork, ArtworkKind, ExternalIds, Font, Id, PartialDate, RecordRef, Role, Scheme, Scored, Tag,
+};
 use serde::{Deserialize, Serialize};
 
 /// A person, group or other credited act, with its page decorated through `visuals`.
@@ -28,10 +30,19 @@ pub struct Artist {
     /// Genres, moods and other weighted tags. Empty when omitted.
     pub tags: Vec<Scored<RecordRef<Tag>>>,
 
-    /// Portraits, banners, logos, motion header and colors.
-    pub visuals: Visuals,
+    /// Portraits, banners, logos and motion headers.
+    pub artwork: Vec<Artwork>,
+    /// Page colors for the artist.
+    pub theme: Option<Scheme>,
     /// Custom font for the artist's name and page headings.
     pub font: Option<Box<Font>>,
+}
+
+impl Artist {
+    /// The primary portrait, preferring one that isn't explicit.
+    pub fn portrait(&self) -> Option<&Artwork> {
+        Artwork::preferred(&self.artwork, ArtworkKind::Portrait)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

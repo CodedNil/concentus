@@ -9,7 +9,7 @@ pub use id::{
 pub use lyrics::{Channel, ChannelKind, Language, Lyrics, Span};
 pub use tag::{Tag, TagKind};
 pub use track::{ContentRating, DerivationKind, TimeRange, Track};
-pub use visuals::{Artwork, ArtworkKind, Font, Rendition, Rgb, Scheme, Theme, Visuals};
+pub use visuals::{Artwork, ArtworkKind, Font, Rendition, Rgb, Scheme};
 
 mod album;
 mod artist;

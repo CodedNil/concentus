@@ -1,14 +1,14 @@
 # Run the local server.
 dev:
-    cargo run --locked -p concentus_server
+    topcoat dev -p concentus_server
 
-# Format the workspace with a single import group.
+# Format Rust and Topcoat views.
 fmt:
-    cargo fmt --all -- --config group_imports=One
+    cargo fmt --all
+    topcoat fmt crates
 
-# Check workspace formatting and compilation.
-check:
-    cargo fmt --all -- --check --config group_imports=One
+# Format the workspace, then check compilation.
+check: fmt
     cargo check --locked --workspace
 
 # Build the native server.

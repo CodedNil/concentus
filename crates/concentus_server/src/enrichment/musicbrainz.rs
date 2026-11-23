@@ -1,0 +1,285 @@
+use crate::catalog::Kind;
+use reqwest::{StatusCode, Url, header::RETRY_AFTER};
+use serde::{Deserialize, de::DeserializeOwned};
+use std::{env, sync::Arc, time::Duration};
+use tokio::sync::Mutex;
+use tokio::time::{Instant, sleep_until};
+use topcoat::{Error, Result};
+
+#[derive(Clone)]
+pub struct MusicBrainz {
+    client: reqwest::Client,
+    endpoint: Url,
+    next_request: Arc<Mutex<Instant>>,
+}
+
+impl MusicBrainz {
+    pub fn new() -> Result<Self> {
+        let endpoint = match env::var("CONCENTUS_MUSICBRAINZ_ENDPOINT") {
+            Ok(endpoint) => endpoint,
+            Err(env::VarError::NotPresent) => "https://musicbrainz.org/ws/2/".into(),
+            Err(error) => return Err(error.into()),
+        };
+        let endpoint = Url::parse(&format!("{}/", endpoint.trim_end_matches('/')))?;
+        Ok(Self {
+            client: reqwest::Client::builder()
+                .user_agent(concat!(
+                    "Concentus/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (https://github.com/CodedNil/concentus)"
+                ))
+                .timeout(Duration::from_secs(6))
+                .build()?,
+            endpoint,
+            next_request: Arc::new(Mutex::new(Instant::now())),
+        })
+    }
+
+    async fn request<T: DeserializeOwned>(&self, path: &str, params: &[(&str, &str)]) -> Result<T> {
+        let mut next = self.next_request.lock().await;
+        let url = self.endpoint.join(path)?;
+        let request = self.client.get(url).query(&[("fmt", "json")]).query(params);
+        let mut retry = true;
+        loop {
+            if *next > Instant::now() + Duration::from_secs(3) {
+                return Err(Error::msg("MusicBrainz asked us to retry later"));
+            }
+            sleep_until(*next).await;
+            *next = Instant::now() + Duration::from_millis(1100);
+            let response = request
+                .try_clone()
+                .expect("GET request is clonable")
+                .send()
+                .await?;
+            if matches!(
+                response.status(),
+                StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+            ) {
+                let delay = response
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|seconds| seconds.parse().ok())
+                    .unwrap_or(2);
+                *next = (*next).max(Instant::now() + Duration::from_secs(delay.min(3600)));
+                if retry && delay <= 3 {
+                    retry = false;
+                    continue;
+                }
+            }
+            drop(next);
+            return Ok(response.error_for_status()?.json().await?);
+        }
+    }
+
+    pub async fn search(&self, kind: Kind, input: &str) -> Result<Batch> {
+        let query = search_query(kind, input);
+        let params = [("query", query.as_str()), ("limit", "5")];
+        Ok(match kind {
+            Kind::Artist => {
+                Batch::Artists(self.request::<Search>("artist", &params).await?.artists)
+            }
+            Kind::Track => Batch::Recordings(
+                self.request::<Search>("recording", &params)
+                    .await?
+                    .recordings,
+            ),
+            Kind::Album => {
+                Batch::Releases(self.request::<Search>("release", &params).await?.releases)
+            }
+            Kind::Tag => Batch::Artists(Vec::new()),
+        })
+    }
+}
+
+impl MusicBrainz {
+    pub async fn release(&self, id: uuid::Uuid) -> Result<Release> {
+        self.request(
+            &format!("release/{id}"),
+            &[(
+                "inc",
+                "recordings+artist-credits+release-groups+labels+isrcs+tags",
+            )],
+        )
+        .await
+    }
+}
+
+fn search_query(kind: Kind, input: &str) -> String {
+    if kind == Kind::Track
+        && let Ok(isrc) = input.parse::<concentus_types::Isrc>()
+    {
+        return format!("isrc:{}", isrc.as_str());
+    }
+    let field = match kind {
+        Kind::Artist => "artist",
+        Kind::Album => "release",
+        Kind::Track => "recording",
+        Kind::Tag => "tag",
+    };
+    let quote = |value: &str| {
+        let mut escaped = String::from("\"");
+        for ch in value.trim().chars() {
+            if matches!(ch, '\\' | '"') {
+                escaped.push('\\');
+            }
+            escaped.push(ch);
+        }
+        escaped.push('"');
+        escaped
+    };
+    if kind != Kind::Artist
+        && let Some((artist, title)) = input.split_once(" — ").or_else(|| input.split_once(" - "))
+        && !artist.trim().is_empty()
+        && !title.trim().is_empty()
+    {
+        return format!("{field}:{} AND artist:{}", quote(title), quote(artist));
+    }
+    if matches!(kind, Kind::Album | Kind::Track) && input.split_whitespace().count() > 1 {
+        let terms = input
+            .split_whitespace()
+            .take(16)
+            .map(|word| {
+                let word = quote(word);
+                format!("({field}:{word} OR artist:{word})")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        return format!("{field}:{}^4 OR ({terms})", quote(input));
+    }
+    format!("{field}:{}", quote(input))
+}
+
+pub enum Batch {
+    Artists(Vec<Artist>),
+    Releases(Vec<Release>),
+    Recordings(Vec<Recording>),
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Search {
+    artists: Vec<Artist>,
+    releases: Vec<Release>,
+    recordings: Vec<Recording>,
+}
+
+#[derive(Deserialize)]
+pub struct Artist {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "sort-name")]
+    pub sort_name: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+    #[serde(rename = "life-span")]
+    pub lifespan: Option<Lifespan>,
+    #[serde(rename = "begin-area")]
+    pub begin_area: Option<Area>,
+    pub area: Option<Area>,
+    #[serde(default)]
+    pub isnis: Vec<String>,
+    #[serde(default)]
+    pub ipis: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<SourceTag>,
+}
+
+#[derive(Deserialize)]
+pub struct Lifespan {
+    pub begin: Option<String>,
+    pub end: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct Area {
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+pub struct SourceTag {
+    pub name: String,
+    pub count: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct Credit {
+    pub artist: Artist,
+}
+
+#[derive(Deserialize)]
+pub struct Release {
+    pub id: String,
+    pub title: String,
+    pub date: Option<String>,
+    pub status: Option<String>,
+    pub barcode: Option<String>,
+    #[serde(rename = "artist-credit", default)]
+    pub credits: Vec<Credit>,
+    #[serde(rename = "release-group")]
+    pub group: Option<ReleaseGroup>,
+    #[serde(rename = "label-info", default)]
+    pub labels: Vec<LabelInfo>,
+    #[serde(rename = "cover-art-archive")]
+    pub cover_art: Option<CoverArt>,
+    #[serde(default)]
+    pub media: Vec<Medium>,
+    #[serde(default)]
+    pub tags: Vec<SourceTag>,
+}
+
+#[derive(Deserialize)]
+pub struct ReleaseGroup {
+    pub id: Option<String>,
+    #[serde(rename = "primary-type")]
+    pub primary_type: Option<String>,
+    #[serde(rename = "secondary-types", default)]
+    pub secondary_types: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct LabelInfo {
+    pub label: Option<Area>,
+    #[serde(rename = "catalog-number")]
+    pub catalog_number: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CoverArt {
+    pub front: bool,
+}
+
+#[derive(Deserialize)]
+pub struct Medium {
+    pub position: Option<i64>,
+    pub title: Option<String>,
+    #[serde(default)]
+    pub tracks: Vec<MediumTrack>,
+}
+
+#[derive(Deserialize)]
+pub struct MediumTrack {
+    pub id: String,
+    pub position: i64,
+    pub length: Option<u32>,
+    pub recording: Recording,
+    #[serde(rename = "artist-credit", default)]
+    pub credits: Vec<Credit>,
+}
+
+#[derive(Deserialize)]
+pub struct Recording {
+    pub id: String,
+    pub title: String,
+    pub length: Option<u32>,
+    #[serde(rename = "first-release-date")]
+    pub date: Option<String>,
+    #[serde(rename = "artist-credit", default)]
+    pub credits: Vec<Credit>,
+    #[serde(default)]
+    pub releases: Vec<Release>,
+    #[serde(default)]
+    pub isrcs: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<SourceTag>,
+}

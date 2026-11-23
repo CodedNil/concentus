@@ -3,18 +3,22 @@ use std::{env, io, path::PathBuf};
 use store::Store;
 
 mod api;
-mod app;
 mod catalog;
+mod enrichment;
 mod lookup;
 mod records;
 mod store;
+mod web;
 
 #[tokio::main]
 async fn main() -> topcoat::Result<()> {
     let database = database_path()?;
     let store = Store::open(&database).await?;
     eprintln!("Concentus database: {}", database.display());
-    Ok(topcoat::start(app::router(store)).await?)
+    let router = topcoat::router::Router::builder()
+        .with(store)
+        .with(enrichment::Enrichment::new()?);
+    Ok(topcoat::start(api::register(web::register(router)).build()).await?)
 }
 
 fn database_path() -> io::Result<PathBuf> {

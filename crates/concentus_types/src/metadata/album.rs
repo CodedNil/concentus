@@ -1,6 +1,6 @@
 use super::{
-    Artist, Credit, ExternalIds, Id, PartialDate, RecordRef, Scored, Tag, Track, Visuals,
-    primary_artists,
+    Artist, Artwork, ArtworkKind, Credit, ExternalIds, Id, PartialDate, RecordRef, Scheme, Scored,
+    Tag, Track, primary_artists,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,11 +38,18 @@ pub struct Album {
     /// Genres, moods and other weighted tags. Empty when omitted.
     pub tags: Vec<Scored<RecordRef<Tag>>>,
 
-    /// Cover art, motion art and colors.
-    pub visuals: Visuals,
+    /// Cover art and motion art for this release.
+    pub artwork: Vec<Artwork>,
+    /// Page colors for the release.
+    pub theme: Option<Scheme>,
 }
 
 impl Album {
+    /// The front cover, preferring one that isn't explicit.
+    pub fn cover(&self) -> Option<&Artwork> {
+        Artwork::preferred(&self.artwork, ArtworkKind::Cover)
+    }
+
     /// The billed main artists, in billing order.
     pub fn primary_artists(&self) -> impl Iterator<Item = Id<Artist>> + '_ {
         primary_artists(&self.credits)

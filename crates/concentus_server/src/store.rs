@@ -1,5 +1,4 @@
 use crate::{
-    catalog::Catalog,
     lookup::SqlLookup,
     records::{DatabaseRecord, read_by_id},
 };
@@ -18,7 +17,8 @@ static MIGRATIONS: Migrator = sqlx::migrate!();
 const MAX_PAGE: u32 = 100;
 
 /// The local catalog database.
-pub struct Store(SqlitePool);
+#[derive(Clone)]
+pub struct Store(pub(crate) SqlitePool);
 
 impl Store {
     pub async fn open(path: &Path) -> Result<Self> {
@@ -100,15 +100,6 @@ impl Store {
     }
 
     pub async fn list<T: DatabaseRecord>(&self, after: Option<&str>, limit: u32) -> Result<Vec<T>> {
-        self.list_with_lyrics(after, limit, false).await
-    }
-
-    async fn list_with_lyrics<T: DatabaseRecord>(
-        &self,
-        after: Option<&str>,
-        limit: u32,
-        include_lyrics: bool,
-    ) -> Result<Vec<T>> {
         let sql = format!(
             "SELECT {} FROM {} AS record WHERE id > ? ORDER BY id LIMIT ?",
             T::COLUMNS,
@@ -122,11 +113,7 @@ impl Store {
             .await?;
         let mut records = Vec::with_capacity(rows.len());
         for row in rows {
-            let mut record = T::read(&mut db, row).await?;
-            if include_lyrics {
-                record.load_lyrics(&mut db).await?;
-            }
-            records.push(record);
+            records.push(T::read(&mut db, row).await?);
         }
         db.commit().await?;
         Ok(records)
@@ -137,15 +124,6 @@ impl Store {
         let record = read_by_id(&mut db, id).await?;
         db.commit().await?;
         Ok(record)
-    }
-
-    /// The first page of each collection shown on the catalog page.
-    pub async fn catalog(&self) -> Result<Catalog> {
-        Ok(Catalog {
-            artists: self.list(None, MAX_PAGE).await?,
-            albums: self.list(None, MAX_PAGE).await?,
-            tracks: self.list_with_lyrics(None, MAX_PAGE, true).await?,
-        })
     }
 }
 

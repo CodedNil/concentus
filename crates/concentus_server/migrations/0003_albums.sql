@@ -10,12 +10,9 @@ CREATE TABLE albums (
     label TEXT,
     copyright TEXT,
     description TEXT,
-    theme_light_background TEXT,
-    theme_light_foreground TEXT,
-    theme_light_accent TEXT,
-    theme_dark_background TEXT,
-    theme_dark_foreground TEXT,
-    theme_dark_accent TEXT
+    theme_background TEXT,
+    theme_foreground TEXT,
+    theme_accent TEXT
 ) STRICT;
 CREATE INDEX albums_title ON albums (trim(title) COLLATE NOCASE);
 

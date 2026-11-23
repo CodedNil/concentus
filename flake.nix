@@ -16,6 +16,7 @@
           clippy
           sqlite
           just
+          topcoat-cli
         ];
       };
     };

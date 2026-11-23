@@ -7,12 +7,9 @@ CREATE TABLE artists (
     begin_date TEXT,
     end_date TEXT,
     origin TEXT,
-    theme_light_background TEXT,
-    theme_light_foreground TEXT,
-    theme_light_accent TEXT,
-    theme_dark_background TEXT,
-    theme_dark_foreground TEXT,
-    theme_dark_accent TEXT,
+    theme_background TEXT,
+    theme_foreground TEXT,
+    theme_accent TEXT,
     theme_font_family TEXT,
     theme_font_url TEXT
 ) STRICT;

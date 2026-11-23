@@ -20,21 +20,20 @@ tokio = { version = "1", features = [
     "rt-multi-thread",
     "net",
     "signal",
+    "sync",
+    "time",
 ] }
 serde.workspace = true
 serde-value = "0.7"
 
 # Web
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
+uuid = { version = "1.29", features = ["v7"] }
 topcoat = { version = "0.12.1", default-features = false, features = [
     "router",
     "view",
     "metadata",
     "serve",
-] }
-
-[build-dependencies]
-topcoat = { version = "0.12.1", default-features = false, features = [
-    "tailwind",
 ] }
 
 [lints]

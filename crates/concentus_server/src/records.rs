@@ -3,7 +3,7 @@ use concentus_types::{
     Album, AlbumType, Artist, ArtistKind, Artwork, ArtworkKind, AudioFeatures, Channel, Collection,
     Credit, DerivationKind, Disc, Edition, ExternalIdProvider, ExternalIds, Font, Id,
     LookupOptions, Lyrics, Membership, RecordRef, RelatedData, Rendition, Role, Scheme, Scored,
-    Span, Tag, Theme, TimeRange, Track, VisualData, Visuals,
+    Span, Tag, TimeRange, Track, VisualData,
 };
 use serde::de::{DeserializeOwned, value::StrDeserializer};
 use sqlx::{AssertSqlSafe, Row, Sqlite, SqliteConnection, query, sqlite::SqliteRow};
@@ -101,7 +101,7 @@ impl DatabaseRecord for Artist {
             end: optional_parse(&row, "end_date")?,
             origin: row.try_get("origin")?,
             tags: ordered(db, "artist_tags", owner, weighted_tag).await?,
-            visuals: visuals(
+            artwork: artwork(
                 db,
                 &row,
                 [
@@ -111,6 +111,7 @@ impl DatabaseRecord for Artist {
                 ],
             )
             .await?,
+            theme: theme(&row)?,
             font,
             external_ids: external_ids(db, "artist_external_ids", row.try_get("id")?).await?,
         })
@@ -121,8 +122,9 @@ impl DatabaseRecord for Artist {
         db: &mut SqliteConnection,
         options: LookupOptions,
     ) -> Result<()> {
-        select_visuals(&mut self.visuals, options.visuals, ArtworkKind::Portrait);
+        select_visuals(&mut self.artwork, options.visuals, ArtworkKind::Portrait);
         if options.visuals != VisualData::Full {
+            self.theme = None;
             self.font = None;
         }
         select_tags(db, &mut self.tags, options.tags).await
@@ -174,7 +176,7 @@ impl DatabaseRecord for Album {
             copyright: row.try_get("copyright")?,
             description: row.try_get("description")?,
             tags: ordered(db, "album_tags", owner, weighted_tag).await?,
-            visuals: visuals(
+            artwork: artwork(
                 db,
                 &row,
                 [
@@ -184,6 +186,7 @@ impl DatabaseRecord for Album {
                 ],
             )
             .await?,
+            theme: theme(&row)?,
             external_ids: external_ids(db, "album_external_ids", row.try_get("id")?).await?,
         })
     }
@@ -193,7 +196,10 @@ impl DatabaseRecord for Album {
         db: &mut SqliteConnection,
         options: LookupOptions,
     ) -> Result<()> {
-        select_visuals(&mut self.visuals, options.visuals, ArtworkKind::Cover);
+        select_visuals(&mut self.artwork, options.visuals, ArtworkKind::Cover);
+        if options.visuals != VisualData::Full {
+            self.theme = None;
+        }
         select_tags(db, &mut self.tags, options.tags).await?;
         match options.tracks {
             RelatedData::None => self.discs.clear(),
@@ -204,7 +210,7 @@ impl DatabaseRecord for Album {
                         let mut track: Track = read_by_id(db, &id.to_string())
                             .await?
                             .ok_or_else(|| Error::msg("Album references a missing track"))?;
-                        select_visuals(&mut track.visuals, options.visuals, ArtworkKind::Cover);
+                        select_visuals(&mut track.artwork, options.visuals, ArtworkKind::Cover);
                         *entry = RecordRef::Data(Box::new(track));
                     }
                 }
@@ -262,7 +268,7 @@ impl DatabaseRecord for Track {
             about: row.try_get("about")?,
             derived_from,
             music_video: row.try_get("music_video")?,
-            visuals: visuals(
+            artwork: artwork(
                 db,
                 &row,
                 [
@@ -289,12 +295,15 @@ impl DatabaseRecord for Track {
                     let mut album: Album = read_by_id(db, &id.to_string())
                         .await?
                         .ok_or_else(|| Error::msg("Track references a missing album"))?;
-                    select_visuals(&mut album.visuals, options.visuals, ArtworkKind::Cover);
+                    select_visuals(&mut album.artwork, options.visuals, ArtworkKind::Cover);
+                    if options.visuals != VisualData::Full {
+                        album.theme = None;
+                    }
                     self.album = RecordRef::Data(Box::new(album));
                 }
             }
         }
-        select_visuals(&mut self.visuals, options.visuals, ArtworkKind::Cover);
+        select_visuals(&mut self.artwork, options.visuals, ArtworkKind::Cover);
         select_tags(db, &mut self.tags, options.tags).await
     }
 
@@ -439,30 +448,32 @@ async fn external_ids(
     Ok(ids)
 }
 
-fn select_visuals(visuals: &mut Visuals, mode: VisualData, primary: ArtworkKind) {
+fn select_visuals(artwork: &mut Vec<Artwork>, mode: VisualData, primary: ArtworkKind) {
     match mode {
         VisualData::Full => {}
-        VisualData::None => *visuals = Visuals::default(),
+        VisualData::None => artwork.clear(),
         VisualData::Primary => {
-            let index = visuals
-                .artwork
+            let index = artwork
                 .iter()
                 .enumerate()
                 .filter(|(_, art)| art.kind == primary)
                 .min_by_key(|(_, art)| art.explicit)
                 .map(|(index, _)| index);
-            visuals.artwork =
-                index.map_or_else(Vec::new, |index| vec![visuals.artwork.swap_remove(index)]);
-            visuals.theme = Theme::default();
+            if let Some(index) = index {
+                artwork.swap(0, index);
+                artwork.truncate(1);
+            } else {
+                artwork.clear();
+            }
         }
     }
 }
 
-async fn visuals(
+async fn artwork(
     db: &mut SqliteConnection,
     row: &SqliteRow,
     [artwork_table, renditions, colors]: [&'static str; 3],
-) -> Result<Visuals> {
+) -> Result<Vec<Artwork>> {
     let mut artwork = Vec::new();
     for art in children(db, artwork_table, Key::Text(row.try_get("id")?)).await? {
         let owner = Key::Number(art.try_get("id")?);
@@ -483,34 +494,14 @@ async fn visuals(
             explicit: art.try_get("explicit")?,
         });
     }
-    Ok(Visuals {
-        artwork,
-        theme: Theme {
-            light: scheme(
-                row,
-                [
-                    "theme_light_background",
-                    "theme_light_foreground",
-                    "theme_light_accent",
-                ],
-            )?,
-            dark: scheme(
-                row,
-                [
-                    "theme_dark_background",
-                    "theme_dark_foreground",
-                    "theme_dark_accent",
-                ],
-            )?,
-        },
-    })
+    Ok(artwork)
 }
 
-fn scheme(row: &SqliteRow, [background, foreground, accent]: [&str; 3]) -> Result<Option<Scheme>> {
+fn theme(row: &SqliteRow) -> Result<Option<Scheme>> {
     match (
-        optional_parse(row, background)?,
-        optional_parse(row, foreground)?,
-        optional_parse(row, accent)?,
+        optional_parse(row, "theme_background")?,
+        optional_parse(row, "theme_foreground")?,
+        optional_parse(row, "theme_accent")?,
     ) {
         (Some(background), Some(foreground), Some(accent)) => Ok(Some(Scheme {
             background,
