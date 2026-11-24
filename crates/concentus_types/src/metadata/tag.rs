@@ -9,22 +9,31 @@ pub struct Tag {
 
     /// Display name.
     pub name: String,
-    /// Whether this is a genre, an emotion or an activity.
+    /// Classification used when browsing and organizing tags.
     pub kind: TagKind,
-    /// Other names for the same tag.
-    pub aliases: Vec<String>,
-
-    /// The broader tag this one belongs to; mostly used to arrange genres as a tree.
-    pub parent: Option<Id<Self>>,
+    /// A broader tag or the canonical tag this name refers to.
+    pub relation: TagRelation,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TagKind {
     /// A style of music: ambient, drill, bossa nova.
-    #[default]
     Genre,
     /// How it feels: melancholy, euphoric.
-    Emotion,
+    Mood,
     /// What it's for or where it fits: workout, focus, road trip.
     Activity,
+    /// Imported or awaiting classification.
+    #[default]
+    Unclassified,
+    /// Omitted from normal catalog views.
+    Hidden,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TagRelation {
+    #[default]
+    None,
+    Parent(Id<Tag>),
+    AliasOf(Id<Tag>),
 }

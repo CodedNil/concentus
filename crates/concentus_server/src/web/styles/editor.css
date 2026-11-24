@@ -1,0 +1,130 @@
+.record-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .75rem;
+    margin-bottom: 1rem;
+    min-height: 2.5rem;
+}
+
+.record-bar .edit-link { margin: 0; background: var(--glass); }
+.edit-toolbar { padding: .8rem 1rem; }
+.edit-actions, .field-header { display: flex; align-items: center; gap: .55rem; }
+.edit-actions { flex-wrap: wrap; }
+.edit-actions > span { color: var(--muted); font-size: .87rem; }
+.edit-actions [type="submit"] { padding: .55rem .9rem; border-radius: .6rem; }
+.edit-actions [type="submit"]:disabled { opacity: .5; cursor: default; }
+
+.inline-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+    gap: .55rem;
+    padding: .65rem;
+    margin-bottom: 1rem;
+    border: 1px solid var(--line);
+    border-radius: .9rem;
+    background: var(--glass);
+}
+.panel .inline-fields { margin: .5rem 1rem 1rem; }
+.inline-field {
+    min-width: 0;
+    padding: .6rem;
+    border: 1px solid transparent;
+    border-radius: .65rem;
+    background: #ffffff08;
+}
+.inline-field[data-wide="true"] { grid-column: 1 / -1; }
+.inline-field[data-edited], .inline-field[data-locked] {
+    border-color: color-mix(in srgb, var(--tone) 52%, transparent);
+}
+.field-header { margin-bottom: .45rem; }
+.field-header > label:first-child {
+    flex: 1;
+    text-transform: capitalize;
+    color: var(--tone);
+    font-size: .85rem;
+    font-weight: 650;
+}
+.field-header small { font-size: .7rem; }
+.inline-field :is(input:not([type="checkbox"]), textarea) {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    padding: .45rem .6rem;
+    border: 1px solid var(--line);
+    border-radius: .5rem;
+    background: #211f37;
+    color: inherit;
+}
+.inline-field textarea { resize: vertical; }
+.inline-field :disabled { opacity: .55; }
+.inline-field [aria-invalid="true"] { border-color: #ffa5a5; }
+.inline-field[data-format="json"] > textarea { font-family: monospace; }
+.structured-label { display: block; color: var(--muted); font-size: .8rem; margin-top: .65rem; }
+.lyrics-editor { display: grid; grid-template-columns: minmax(5rem, 8rem) 1fr; gap: .65rem; }
+.lyrics-editor label { color: var(--muted); font-size: .85rem; }
+
+.history-icon, .refresh-toggle {
+    display: inline-grid;
+    flex: none;
+    place-items: center;
+    width: 1.85rem;
+    height: 1.85rem;
+    border: 1px solid var(--line);
+    border-radius: .45rem;
+    background: #ffffff0a;
+    color: var(--tone);
+    cursor: pointer;
+}
+.history-icon:hover, .history-icon[aria-expanded="true"], .refresh-toggle:hover {
+    background: color-mix(in srgb, var(--tone) 16%, transparent);
+}
+.refresh-toggle { position: relative; }
+.refresh-toggle input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.refresh-toggle:has(input:focus-visible) { outline: 2px solid var(--tone); outline-offset: 2px; }
+.refresh-toggle:has(input:checked) {
+    border-color: var(--tone);
+    background: color-mix(in srgb, var(--tone) 26%, transparent);
+    box-shadow: 0 0 .75rem color-mix(in srgb, var(--tone) 55%, transparent);
+}
+.history-icon svg, .refresh-toggle svg {
+    width: 1rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+.edit-diff {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .25rem .5rem;
+    align-items: baseline;
+    margin-top: .45rem;
+    font-size: .82rem;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+}
+.edit-diff[hidden] { display: none; }
+.edit-diff del { color: #f2aebc; }
+.edit-diff ins { color: #adf5d6; text-decoration: none; }
+.edit-diff :is(del, ins) { min-width: 0; max-height: 5rem; overflow: auto; }
+.edit-history {
+    margin-top: .6rem;
+    padding: .65rem;
+    max-height: 18rem;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: .55rem;
+    background: #232039;
+    box-shadow: 0 .4rem 1rem #15122666;
+}
+.edit-history h3 { font-size: .84rem; }
+.edit-history button {
+    display: block;
+    margin-top: .4rem;
+    padding: .3rem .55rem;
+    border-radius: .4rem;
+    font-size: .78rem;
+}
+.revision { border-top: 1px solid var(--line); margin-top: .45rem; padding-top: .45rem; }

@@ -41,8 +41,14 @@ impl Source {
             .get(self.url.clone())
             .query(params)
             .send()
-            .await?;
+            .await
+            .map_err(reqwest::Error::without_url)?;
         let status = response.status();
+        tracing::debug!(
+            host = self.url.host_str(),
+            status = status.as_u16(),
+            "Provider responded"
+        );
         if matches!(
             status,
             StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
@@ -58,7 +64,12 @@ impl Source {
         if status == StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        let value = response.error_for_status()?.json().await?;
+        let value = response
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?
+            .json()
+            .await
+            .map_err(reqwest::Error::without_url)?;
         *next = Instant::now() + Duration::from_millis(750);
         drop(next);
         Ok(Some(value))

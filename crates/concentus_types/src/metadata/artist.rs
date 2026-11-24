@@ -1,6 +1,4 @@
-use super::{
-    Artwork, ArtworkKind, ExternalIds, Font, Id, PartialDate, RecordRef, Role, Scheme, Scored, Tag,
-};
+use super::{Artwork, ExternalIds, Font, Id, PartialDate, RecordRef, Role, Scheme, Scored, Tag};
 use serde::{Deserialize, Serialize};
 
 /// A person, group or other credited act, with its page decorated through `visuals`.
@@ -30,8 +28,14 @@ pub struct Artist {
     /// Genres, moods and other weighted tags. Empty when omitted.
     pub tags: Vec<Scored<RecordRef<Tag>>>,
 
-    /// Portraits, banners, logos and motion headers.
-    pub artwork: Vec<Artwork>,
+    /// Preferred square artwork.
+    pub artwork_square: Option<Box<Artwork>>,
+    /// Preferred banner artwork.
+    pub artwork_banner: Option<Box<Artwork>>,
+    /// Preferred portrait artwork.
+    pub artwork_portrait: Option<Box<Artwork>>,
+    /// Preferred motion banner artwork.
+    pub artwork_motion_banner: Option<Box<Artwork>>,
     /// Page colors for the artist.
     pub theme: Option<Scheme>,
     /// Custom font for the artist's name and page headings.
@@ -39,9 +43,9 @@ pub struct Artist {
 }
 
 impl Artist {
-    /// The primary portrait, preferring one that isn't explicit.
+    /// The preferred portrait.
     pub fn portrait(&self) -> Option<&Artwork> {
-        Artwork::preferred(&self.artwork, ArtworkKind::Portrait)
+        self.artwork_portrait.as_deref()
     }
 }
 
@@ -71,4 +75,13 @@ pub struct Membership {
     pub joined: Option<PartialDate>,
     /// When the member left the group, if known.
     pub left: Option<PartialDate>,
+}
+
+/// Artwork roles for a artist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArtistArtworkKind {
+    Square,
+    Banner,
+    Portrait,
+    MotionBanner,
 }

@@ -1,0 +1,79 @@
+.chips .tag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: .45rem;
+}
+.tag-weight-orbit {
+    flex: none;
+    width: .95rem;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background:
+        radial-gradient(circle, #c3aee4 0 16%, #292038 21% 36%, transparent 42%),
+        conic-gradient(#f8bffc, #a6eae7 var(--tag-weight, 0%), #ffffff1f var(--tag-weight, 0%));
+    box-shadow: 0 0 .45rem color-mix(in srgb, #d4b8ff var(--tag-weight, 0%), transparent);
+}
+.tag-trigger[aria-expanded="true"] .tip { display: none; }
+.tag-details {
+    position: fixed;
+    inset: auto;
+    margin: 0;
+    width: min(34rem, calc(100vw - 1rem));
+    max-height: min(37rem, 75vh);
+    overflow: auto;
+    padding: .95rem;
+    color: #f4eefb;
+    background: #292541;
+    border: 1px solid #8572a9;
+    border-radius: .9rem;
+    box-shadow: 0 .9rem 2.6rem #100b27a0;
+}
+.tag-detail-close {
+    float: right;
+    padding: 0 .55rem;
+    border-radius: .45rem;
+    background: #ffffff12;
+    color: var(--accent);
+    font-size: 1.25rem;
+}
+.tag-detail-close:hover { color: #261333; }
+.tag-detail-heading .eyebrow { margin: 0; }
+.tag-detail-heading h2 { font-size: 1.45rem; }
+.tag-detail-heading button { color: var(--accent); text-decoration: underline; }
+.tag-details input {
+    width: 100%;
+    margin-top: .65rem;
+    padding: .48rem .6rem;
+    color: inherit;
+    background: #211d36;
+    border: 1px solid var(--line);
+    border-radius: .5rem;
+}
+.tag-shelf { margin-top: .75rem; }
+.tag-shelf > header { display: flex; justify-content: space-between; align-items: center; }
+.tag-shelf h3 { font-size: .87rem; color: var(--muted); }
+.tag-shelf-nav { display: flex; gap: .25rem; }
+.tag-shelf-nav button { border-radius: .4rem; padding: .12rem .55rem; }
+.tag-shelf-nav button:disabled { opacity: .4; cursor: default; }
+.tag-shelf .entries[data-kind] {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(7.5rem, 26%);
+    grid-template-columns: none;
+    overflow-x: auto;
+    gap: .45rem;
+    padding: .4rem 0;
+    scroll-snap-type: x mandatory;
+}
+.tag-shelf .entries > li { min-width: 0; border: 0; scroll-snap-align: start; }
+.tag-shelf .entries .entry {
+    height: 100%;
+    grid-template-columns: minmax(0, 1fr);
+    padding: .32rem;
+    gap: .32rem;
+    font-size: .8rem;
+    background: #ffffff0a;
+}
+.tag-shelf .entry:hover { background: #ffffff18; }
+.tag-shelf .entry .entry-icon { width: 86%; }
+.tag-shelf .entry .arrow, .tag-shelf .entry .tip { display: none; }

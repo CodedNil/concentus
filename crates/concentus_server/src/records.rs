@@ -1,9 +1,9 @@
 //! Maps normalized SQLite rows to the shared metadata types.
 use concentus_types::{
-    Album, AlbumType, Artist, ArtistKind, Artwork, ArtworkKind, AudioFeatures, Channel, Collection,
-    Credit, DerivationKind, Disc, Edition, ExternalIdProvider, ExternalIds, Font, Id,
-    LookupOptions, Lyrics, Membership, RecordRef, RelatedData, Rendition, Role, Scheme, Scored,
-    Span, Tag, TimeRange, Track, VisualData,
+    Album, AlbumArtworkKind, AlbumType, Artist, ArtistArtworkKind, ArtistKind, Artwork,
+    AudioFeatures, Channel, Collection, Credit, DerivationKind, Disc, Edition, ExternalIdProvider,
+    ExternalIds, Font, Id, LookupOptions, Lyrics, Membership, RecordRef, RelatedData, Rendition,
+    Role, Scheme, Scored, Span, Tag, TagRelation, TimeRange, Track, TrackArtworkKind, VisualData,
 };
 use serde::de::{DeserializeOwned, value::StrDeserializer};
 use sqlx::{AssertSqlSafe, Row, Sqlite, SqliteConnection, query, sqlite::SqliteRow};
@@ -101,7 +101,11 @@ impl DatabaseRecord for Artist {
             end: optional_parse(&row, "end_date")?,
             origin: row.try_get("origin")?,
             tags: read_tags(db, row.try_get("id")?).await?,
-            artwork: artwork(db, owner).await?,
+            artwork_square: artwork(db, row.try_get("id")?, ArtistArtworkKind::Square).await?,
+            artwork_banner: artwork(db, row.try_get("id")?, ArtistArtworkKind::Banner).await?,
+            artwork_portrait: artwork(db, row.try_get("id")?, ArtistArtworkKind::Portrait).await?,
+            artwork_motion_banner: artwork(db, row.try_get("id")?, ArtistArtworkKind::MotionBanner)
+                .await?,
             theme: theme(&row)?,
             font,
             external_ids: external_ids(db, row.try_get("id")?).await?,
@@ -113,10 +117,19 @@ impl DatabaseRecord for Artist {
         db: &mut SqliteConnection,
         options: LookupOptions,
     ) -> Result<()> {
-        select_visuals(&mut self.artwork, options.visuals, ArtworkKind::Portrait);
+        if options.visuals == VisualData::None {
+            self.artwork_square = None;
+        }
+        if options.visuals == VisualData::None
+            || options.visuals == VisualData::Primary && self.artwork_square.is_some()
+        {
+            self.artwork_portrait = None;
+        }
         if options.visuals != VisualData::Full {
             self.theme = None;
             self.font = None;
+            self.artwork_banner = None;
+            self.artwork_motion_banner = None;
         }
         select_tags(db, &mut self.tags, options.tags).await
     }
@@ -167,7 +180,10 @@ impl DatabaseRecord for Album {
             copyright: row.try_get("copyright")?,
             description: row.try_get("description")?,
             tags: read_tags(db, row.try_get("id")?).await?,
-            artwork: artwork(db, owner).await?,
+            artwork_square: artwork(db, row.try_get("id")?, AlbumArtworkKind::Square).await?,
+            artwork_banner: artwork(db, row.try_get("id")?, AlbumArtworkKind::Banner).await?,
+            artwork_motion_square: artwork(db, row.try_get("id")?, AlbumArtworkKind::MotionSquare)
+                .await?,
             theme: theme(&row)?,
             external_ids: external_ids(db, row.try_get("id")?).await?,
         })
@@ -178,10 +194,7 @@ impl DatabaseRecord for Album {
         db: &mut SqliteConnection,
         options: LookupOptions,
     ) -> Result<()> {
-        select_visuals(&mut self.artwork, options.visuals, ArtworkKind::Cover);
-        if options.visuals != VisualData::Full {
-            self.theme = None;
-        }
+        album_visuals(self, options.visuals);
         select_tags(db, &mut self.tags, options.tags).await?;
         match options.tracks {
             RelatedData::None => self.discs.clear(),
@@ -192,7 +205,9 @@ impl DatabaseRecord for Album {
                         let mut track: Track = read_by_id(db, &id.to_string())
                             .await?
                             .ok_or_else(|| Error::msg("Album references a missing track"))?;
-                        select_visuals(&mut track.artwork, options.visuals, ArtworkKind::Cover);
+                        if options.visuals == VisualData::None {
+                            track.artwork_canvas = None;
+                        }
                         *entry = RecordRef::Data(Box::new(track));
                     }
                 }
@@ -250,7 +265,7 @@ impl DatabaseRecord for Track {
             about: row.try_get("about")?,
             derived_from,
             music_video: row.try_get("music_video")?,
-            artwork: artwork(db, owner).await?,
+            artwork_canvas: artwork(db, row.try_get("id")?, TrackArtworkKind::Canvas).await?,
             external_ids: external_ids(db, row.try_get("id")?).await?,
         })
     }
@@ -268,15 +283,14 @@ impl DatabaseRecord for Track {
                     let mut album: Album = read_by_id(db, &id.to_string())
                         .await?
                         .ok_or_else(|| Error::msg("Track references a missing album"))?;
-                    select_visuals(&mut album.artwork, options.visuals, ArtworkKind::Cover);
-                    if options.visuals != VisualData::Full {
-                        album.theme = None;
-                    }
+                    album_visuals(&mut album, options.visuals);
                     self.album = RecordRef::Data(Box::new(album));
                 }
             }
         }
-        select_visuals(&mut self.artwork, options.visuals, ArtworkKind::Cover);
+        if options.visuals == VisualData::None {
+            self.artwork_canvas = None;
+        }
         select_tags(db, &mut self.tags, options.tags).await
     }
 
@@ -317,17 +331,22 @@ impl DatabaseRecord for Track {
 }
 
 impl DatabaseRecord for Tag {
-    async fn read(db: &mut SqliteConnection, row: SqliteRow) -> Result<Self> {
-        Ok(Self {
-            id: parse(&row, "id")?,
-            name: row.try_get("name")?,
-            kind: unit_enum(row.try_get("kind")?)?,
-            aliases: ordered(db, "tag_aliases", Key::Text(row.try_get("id")?), |row| {
-                Ok(row.try_get("alias")?)
+    fn read(_db: &mut SqliteConnection, row: SqliteRow) -> impl Future<Output = Result<Self>> {
+        std::future::ready((|| {
+            let id = optional_parse(&row, "related_id")?;
+            let relation = match (row.try_get::<Option<&str>, _>("relation_kind")?, id) {
+                (Some("Parent"), Some(id)) => TagRelation::Parent(id),
+                (Some("AliasOf"), Some(id)) => TagRelation::AliasOf(id),
+                (None, None) => TagRelation::None,
+                _ => return Err(Error::msg("Invalid tag relationship")),
+            };
+            Ok(Self {
+                id: parse(&row, "id")?,
+                name: row.try_get("name")?,
+                kind: unit_enum(row.try_get("kind")?)?,
+                relation,
             })
-            .await?,
-            parent: optional_parse(&row, "parent")?,
-        })
+        })())
     }
 }
 
@@ -430,49 +449,47 @@ async fn external_ids(db: &mut SqliteConnection, owner: &str) -> Result<External
     Ok(ids)
 }
 
-fn select_visuals(artwork: &mut Vec<Artwork>, mode: VisualData, primary: ArtworkKind) {
-    match mode {
-        VisualData::Full => {}
-        VisualData::None => artwork.clear(),
-        VisualData::Primary => {
-            let index = artwork
-                .iter()
-                .enumerate()
-                .filter(|(_, art)| art.kind == primary)
-                .min_by_key(|(_, art)| art.explicit)
-                .map(|(index, _)| index);
-            if let Some(index) = index {
-                artwork.swap(0, index);
-                artwork.truncate(1);
-            } else {
-                artwork.clear();
-            }
-        }
+fn album_visuals(album: &mut Album, mode: VisualData) {
+    if mode == VisualData::None {
+        album.artwork_square = None;
+    }
+    if mode != VisualData::Full {
+        album.theme = None;
+        album.artwork_banner = None;
+        album.artwork_motion_square = None;
     }
 }
 
-async fn artwork(db: &mut SqliteConnection, owner: Key<'_>) -> Result<Vec<Artwork>> {
-    let mut artwork = Vec::new();
-    for art in children(db, "artwork", owner).await? {
-        let owner = Key::Number(art.try_get("id")?);
-        artwork.push(Artwork {
-            kind: unit_enum(art.try_get("kind")?)?,
-            files: ordered(db, "artwork_renditions", owner, |row| {
-                Ok(Rendition {
-                    url: row.try_get("url")?,
-                    width: row.try_get("width")?,
-                    height: row.try_get("height")?,
-                    codec: row.try_get("codec")?,
-                    duration_ms: row.try_get("duration_ms")?,
-                })
+async fn artwork(
+    db: &mut SqliteConnection,
+    record: &str,
+    slot: impl std::fmt::Debug + Send,
+) -> Result<Option<Box<Artwork>>> {
+    let Some(art) =
+        query("SELECT id, blurhash, explicit FROM artwork WHERE owner_id = ? AND kind = ?")
+            .bind(record)
+            .bind(format!("{slot:?}"))
+            .fetch_optional(&mut *db)
+            .await?
+    else {
+        return Ok(None);
+    };
+    let owner = Key::Number(art.try_get("id")?);
+    Ok(Some(Box::new(Artwork {
+        files: ordered(db, "artwork_renditions", owner, |row| {
+            Ok(Rendition {
+                url: row.try_get("url")?,
+                width: row.try_get("width")?,
+                height: row.try_get("height")?,
+                codec: row.try_get("codec")?,
+                duration_ms: row.try_get("duration_ms")?,
             })
-            .await?,
-            colors: ordered(db, "artwork_colors", owner, |row| parse(row, "color")).await?,
-            blurhash: art.try_get("blurhash")?,
-            explicit: art.try_get("explicit")?,
-        });
-    }
-    Ok(artwork)
+        })
+        .await?,
+        colors: ordered(db, "artwork_colors", owner, |row| parse(row, "color")).await?,
+        blurhash: art.try_get("blurhash")?,
+        explicit: art.try_get("explicit")?,
+    })))
 }
 
 fn theme(row: &SqliteRow) -> Result<Option<Scheme>> {

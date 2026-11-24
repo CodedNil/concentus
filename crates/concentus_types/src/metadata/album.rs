@@ -1,6 +1,6 @@
 use super::{
-    Artist, Artwork, ArtworkKind, Credit, ExternalIds, Id, PartialDate, RecordRef, Scheme, Scored,
-    Tag, Track, primary_artists,
+    Artist, Artwork, Credit, ExternalIds, Id, PartialDate, RecordRef, Scheme, Scored, Tag, Track,
+    primary_artists,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,16 +38,20 @@ pub struct Album {
     /// Genres, moods and other weighted tags. Empty when omitted.
     pub tags: Vec<Scored<RecordRef<Tag>>>,
 
-    /// Cover art and motion art for this release.
-    pub artwork: Vec<Artwork>,
+    /// Preferred square artwork.
+    pub artwork_square: Option<Box<Artwork>>,
+    /// Preferred banner artwork.
+    pub artwork_banner: Option<Box<Artwork>>,
+    /// Preferred motion square artwork.
+    pub artwork_motion_square: Option<Box<Artwork>>,
     /// Page colors for the release.
     pub theme: Option<Scheme>,
 }
 
 impl Album {
-    /// The front cover, preferring one that isn't explicit.
+    /// The preferred square cover.
     pub fn cover(&self) -> Option<&Artwork> {
-        Artwork::preferred(&self.artwork, ArtworkKind::Cover)
+        self.artwork_square.as_deref()
     }
 
     /// The billed main artists, in billing order.
@@ -129,4 +133,12 @@ fn track_id(track: &RecordRef<Track>) -> Option<Id<Track>> {
         RecordRef::Id(id) => Some(*id),
         RecordRef::Data(track) => Some(track.id),
     }
+}
+
+/// Artwork roles for a album.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AlbumArtworkKind {
+    Square,
+    Banner,
+    MotionSquare,
 }

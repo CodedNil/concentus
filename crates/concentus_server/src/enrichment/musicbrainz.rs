@@ -14,6 +14,33 @@ pub struct MusicBrainz {
 }
 
 impl MusicBrainz {
+    pub async fn albums_by_artist(&self, id: uuid::Uuid) -> Result<Vec<Release>> {
+        let id = id.to_string();
+        let mut releases = Vec::new();
+        loop {
+            let page: ReleasePage = self
+                .request(
+                    "release",
+                    &[
+                        ("artist", &id),
+                        ("type", "album"),
+                        ("status", "official"),
+                        ("inc", "artist-credits+release-groups+labels"),
+                        ("limit", "100"),
+                        ("offset", &releases.len().to_string()),
+                    ],
+                )
+                .await?;
+            if page.releases.is_empty() {
+                return Ok(releases);
+            }
+            releases.extend(page.releases);
+            if releases.len() >= page.count {
+                return Ok(releases);
+            }
+        }
+    }
+
     pub async fn entity(&self, kind: Kind, id: uuid::Uuid) -> Result<Batch> {
         Ok(match kind {
             Kind::Artist => Batch::Artists(vec![
@@ -88,7 +115,13 @@ impl MusicBrainz {
                 .try_clone()
                 .expect("GET request is clonable")
                 .send()
-                .await?;
+                .await
+                .map_err(reqwest::Error::without_url)?;
+            tracing::debug!(
+                provider = "MusicBrainz",
+                status = response.status().as_u16(),
+                "Provider responded"
+            );
             if matches!(
                 response.status(),
                 StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
@@ -106,7 +139,12 @@ impl MusicBrainz {
                 }
             }
             drop(next);
-            return Ok(response.error_for_status()?.json().await?);
+            return Ok(response
+                .error_for_status()
+                .map_err(reqwest::Error::without_url)?
+                .json()
+                .await
+                .map_err(reqwest::Error::without_url)?);
         }
     }
 
@@ -139,6 +177,13 @@ impl MusicBrainz {
         )
         .await
     }
+}
+
+#[derive(Deserialize)]
+struct ReleasePage {
+    #[serde(rename = "release-count")]
+    count: usize,
+    releases: Vec<Release>,
 }
 
 #[derive(Deserialize)]

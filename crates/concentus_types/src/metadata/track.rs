@@ -1,6 +1,6 @@
 use super::{
-    Album, Artist, Artwork, ArtworkKind, AudioFeatures, Credit, ExternalIds, Id, Language, Lyrics,
-    PartialDate, RecordRef, Scored, Tag, primary_artists,
+    Album, Artist, Artwork, AudioFeatures, Credit, ExternalIds, Id, Language, Lyrics, PartialDate,
+    RecordRef, Scored, Tag, primary_artists,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,16 +43,16 @@ pub struct Track {
     /// The story behind the song.
     pub about: Option<String>,
 
-    /// Track artwork and canvas loops.
-    pub artwork: Vec<Artwork>,
+    /// Preferred canvas artwork.
+    pub artwork_canvas: Option<Box<Artwork>>,
     /// Link to the music video on a video site such as `YouTube`.
     pub music_video: Option<String>,
 }
 
 impl Track {
-    /// The track's own cover, preferring one that isn't explicit.
-    pub fn cover(&self) -> Option<&Artwork> {
-        Artwork::preferred(&self.artwork, ArtworkKind::Cover)
+    /// The track's optional playback loop.
+    pub fn canvas(&self) -> Option<&Artwork> {
+        self.artwork_canvas.as_deref()
     }
 
     /// The primary album ID, whether the response includes the full album or just the ID.
@@ -106,4 +106,10 @@ pub struct TimeRange {
     pub start_ms: u32,
     /// End, from the beginning of the track.
     pub end_ms: u32,
+}
+
+/// Artwork roles for a track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrackArtworkKind {
+    Canvas,
 }

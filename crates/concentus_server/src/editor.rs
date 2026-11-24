@@ -11,6 +11,7 @@ struct Table {
     name: &'static str,
     scope: &'static str,
     root: &'static str,
+    artwork_slot: Option<&'static str>,
 }
 
 const fn table(name: &'static str, root: &'static str) -> Table {
@@ -18,6 +19,7 @@ const fn table(name: &'static str, root: &'static str) -> Table {
         name,
         scope: root,
         root,
+        artwork_slot: None,
     }
 }
 
@@ -26,20 +28,38 @@ const fn children(name: &'static str, scope: &'static str) -> Table {
         name,
         scope,
         root: "",
+        artwork_slot: None,
     }
 }
 
-const ARTWORK: &[Table] = &[
-    table("artwork", "owner_id = ?1"),
-    children(
-        "artwork_renditions",
-        "owner_id IN (SELECT id FROM artwork WHERE owner_id = ?1)",
-    ),
-    children(
-        "artwork_colors",
-        "owner_id IN (SELECT id FROM artwork WHERE owner_id = ?1)",
-    ),
-];
+macro_rules! artwork {
+    ($slot:literal) => {
+        &[
+            Table {
+                name: "artwork",
+                scope: concat!("owner_id = ?1 AND kind = '", $slot, "'"),
+                root: "owner_id = ?1",
+                artwork_slot: Some($slot),
+            },
+            children(
+                "artwork_renditions",
+                concat!(
+                    "owner_id IN (SELECT id FROM artwork WHERE owner_id = ?1 AND kind = '",
+                    $slot,
+                    "')"
+                ),
+            ),
+            children(
+                "artwork_colors",
+                concat!(
+                    "owner_id IN (SELECT id FROM artwork WHERE owner_id = ?1 AND kind = '",
+                    $slot,
+                    "')"
+                ),
+            ),
+        ]
+    };
+}
 
 macro_rules! direct {
     ($name:literal) => {
@@ -52,7 +72,10 @@ const fn groups(kind: Kind) -> &'static [(&'static str, &'static [Table])] {
         Kind::Artist => {
             const {
                 &[
-                    ("artwork", ARTWORK),
+                    ("artwork_square", artwork!("Square")),
+                    ("artwork_banner", artwork!("Banner")),
+                    ("artwork_portrait", artwork!("Portrait")),
+                    ("artwork_motion_banner", artwork!("MotionBanner")),
                     (
                         "members",
                         &[
@@ -71,7 +94,9 @@ const fn groups(kind: Kind) -> &'static [(&'static str, &'static [Table])] {
         Kind::Album => {
             const {
                 &[
-                    ("artwork", ARTWORK),
+                    ("artwork_square", artwork!("Square")),
+                    ("artwork_banner", artwork!("Banner")),
+                    ("artwork_motion_square", artwork!("MotionSquare")),
                     ("credits", direct!("credits")),
                     (
                         "discs",
@@ -91,7 +116,7 @@ const fn groups(kind: Kind) -> &'static [(&'static str, &'static [Table])] {
         Kind::Track => {
             const {
                 &[
-                    ("artwork", ARTWORK),
+                    ("artwork_canvas", artwork!("Canvas")),
                     ("credits", direct!("credits")),
                     ("languages", direct!("track_languages")),
                     ("derived_from", direct!("track_derivations")),
@@ -111,7 +136,7 @@ const fn groups(kind: Kind) -> &'static [(&'static str, &'static [Table])] {
                 ]
             }
         }
-        Kind::Tag => const { &[("aliases", direct!("tag_aliases"))] },
+        Kind::Tag => &[],
     }
 }
 
@@ -192,6 +217,7 @@ pub async fn audit(
     kind: Kind,
     id: &str,
     before: &Snapshot,
+    source: &str,
 ) -> Result<()> {
     let after = snapshot(db, kind, id).await?;
     for (field, value) in after {
@@ -200,14 +226,17 @@ pub async fn audit(
             continue;
         }
         query(
-            "INSERT INTO record_history (record_id, field, minute, old_value, new_value)
-            VALUES (?, ?, unixepoch() / 60, ?, ?)
-            ON CONFLICT(record_id, field, minute) DO UPDATE SET new_value = excluded.new_value",
+            "INSERT INTO record_history (record_id, field, minute, old_value, new_value, source)
+            VALUES (?, ?, unixepoch() / 60, ?, ?, ?)
+            ON CONFLICT(record_id, field, minute) DO UPDATE SET
+                old_value = CASE WHEN record_history.old_value = record_history.new_value THEN excluded.old_value ELSE record_history.old_value END,
+                new_value = excluded.new_value, source = excluded.source",
         )
         .bind(id)
         .bind(field)
         .bind(previous.to_string())
         .bind(value.to_string())
+        .bind(source)
         .execute(&mut *db)
         .await?;
     }
@@ -216,6 +245,9 @@ pub async fn audit(
 
 pub async fn seed(db: &mut SqliteConnection, kind: Kind, id: &str) -> Result<()> {
     for (field, value) in snapshot(db, kind, id).await? {
+        if !crate::enrichment::can_refresh(kind, &field) {
+            continue;
+        }
         if missing(&value)
             || (field == "discs"
                 && value
@@ -234,7 +266,7 @@ pub async fn seed(db: &mut SqliteConnection, kind: Kind, id: &str) -> Result<()>
 pub async fn queue(db: &mut SqliteConnection, id: &str, field: &str, refresh: bool) -> Result<()> {
     query("INSERT INTO enrichment_needed (record_id, field, due_at, refresh, generation) VALUES (?, ?, unixepoch(), ?, random())
         ON CONFLICT(record_id, field) DO UPDATE SET due_at = excluded.due_at,
-            generation = excluded.generation, refresh = excluded.refresh WHERE excluded.refresh")
+            generation = excluded.generation, refresh = excluded.refresh, last_error = NULL WHERE excluded.refresh")
         .bind(id).bind(field).bind(refresh).execute(db).await?;
     Ok(())
 }
@@ -257,7 +289,7 @@ pub async fn reconcile_source(
         }
     }
     verify(db, kind, id).await?;
-    audit(db, kind, id, before).await
+    audit(db, kind, id, before, "MusicBrainz").await
 }
 
 #[derive(sqlx::FromRow)]
@@ -266,146 +298,169 @@ pub struct Revision {
     pub minute: i64,
     pub old_value: String,
     pub new_value: String,
+    pub source: String,
 }
 
-impl Store {
-    pub async fn save_lyrics(&self, track: &str, language: &str, text: &str) -> Result<()> {
-        let language = language.trim();
-        if language.is_empty()
-            || language.len() > 35
-            || !language.split('-').all(|part| {
-                !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric())
-            })
-        {
-            return Err(Error::msg("Enter a language tag such as en or pt-BR"));
-        }
-        let mut db = self.0.begin_with("BEGIN IMMEDIATE").await?;
-        let before = snapshot(&mut db, Kind::Track, track).await?;
-        if before.is_empty() {
-            return Err(Error::msg("Unknown track"));
-        }
-        query("DELETE FROM track_lyrics WHERE track_id = ? AND language = ?")
+#[derive(serde::Deserialize)]
+pub struct EditBatch {
+    changes: Snapshot,
+    refresh: Vec<String>,
+    lyrics: Option<LyricsEdit>,
+}
+
+#[derive(serde::Deserialize)]
+struct LyricsEdit {
+    language: String,
+    text: String,
+}
+
+async fn set_lyrics(
+    db: &mut SqliteConnection,
+    track: &str,
+    language: &str,
+    text: &str,
+) -> Result<()> {
+    let language = language.trim();
+    if language.is_empty()
+        || language.len() > 35
+        || !language
+            .split('-')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+    {
+        return Err(Error::msg("Enter a language tag such as en or pt-BR"));
+    }
+    query("DELETE FROM track_lyrics WHERE track_id = ? AND language = ?")
+        .bind(track)
+        .bind(language)
+        .execute(&mut *db)
+        .await?;
+    if !text.trim().is_empty() {
+        query("INSERT INTO track_lyrics (track_id, language, instrumental) VALUES (?, ?, 0)")
             .bind(track)
             .bind(language)
             .execute(&mut *db)
             .await?;
-        if !text.trim().is_empty() {
-            query("INSERT INTO track_lyrics (track_id, language, instrumental) VALUES (?, ?, 0)")
-                .bind(track)
-                .bind(language)
-                .execute(&mut *db)
-                .await?;
-            let channel: i64 = query_scalar(
-                "INSERT INTO lyrics_channels (track_id, language, position, kind)
-                VALUES (?, ?, 0, 'Lead') RETURNING id",
-            )
-            .bind(track)
-            .bind(language)
-            .fetch_one(&mut *db)
+        let channel: i64 = query_scalar(
+            "INSERT INTO lyrics_channels (track_id, language, position, kind)
+            VALUES (?, ?, 0, 'Lead') RETURNING id",
+        )
+        .bind(track)
+        .bind(language)
+        .fetch_one(&mut *db)
+        .await?;
+        query("INSERT INTO channel_spans (owner_id, position, text) VALUES (?, 0, ?)")
+            .bind(channel)
+            .bind(text)
+            .execute(&mut *db)
             .await?;
-            query("INSERT INTO channel_spans (owner_id, position, text) VALUES (?, 0, ?)")
-                .bind(channel)
-                .bind(text)
-                .execute(&mut *db)
-                .await?;
-        }
-        audit(&mut db, Kind::Track, track, &before).await?;
-        clear_job(&mut db, track, "lyrics").await?;
-        db.commit().await?;
-        Ok(())
     }
+    Ok(())
+}
 
+#[derive(sqlx::FromRow)]
+pub struct EnrichmentState {
+    pub field: String,
+    pub status: String,
+    pub provider: Option<String>,
+    pub checked_at: Option<i64>,
+    pub error: Option<String>,
+}
+
+impl Store {
     pub async fn editor(
         &self,
         kind: Kind,
         id: &str,
-    ) -> Result<(Snapshot, Vec<Revision>, Vec<String>)> {
+    ) -> Result<(Snapshot, Vec<Revision>, Vec<EnrichmentState>)> {
         let mut db = self.0.begin().await?;
         let fields = snapshot(&mut db, kind, id).await?;
         let revisions = sqlx::query_as(
-            "SELECT field, minute, old_value, new_value FROM record_history
+            "SELECT field, minute, old_value, new_value, source FROM record_history
             WHERE record_id = ? AND old_value != new_value ORDER BY minute DESC, field",
         )
         .bind(id)
         .fetch_all(&mut *db)
         .await?;
-        let pending = query_scalar("SELECT field FROM enrichment_needed WHERE record_id = ?")
-            .bind(id)
-            .fetch_all(&mut *db)
-            .await?;
+        let pending = sqlx::query_as(
+            "SELECT field, CASE WHEN last_error IS NULL THEN 'Queued' ELSE 'Retry scheduled' END AS status,
+                    NULL AS provider, NULL AS checked_at, last_error AS error
+             FROM enrichment_needed WHERE record_id = ?1
+             UNION ALL
+             SELECT history.field, history.outcome, history.check_source, history.checked_at, NULL
+             FROM record_history AS history WHERE history.record_id = ?1 AND history.checked_at IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM enrichment_needed WHERE record_id = ?1 AND field = history.field)
+             AND history.minute = (SELECT max(minute) FROM record_history
+                 WHERE record_id = ?1 AND field = history.field AND checked_at IS NOT NULL)",
+        ).bind(id).fetch_all(&mut *db).await?;
         db.commit().await?;
         Ok((fields, revisions, pending))
     }
 
-    pub async fn edit(
-        &self,
-        kind: Kind,
-        id: &str,
-        action: &str,
-        field: &str,
-        input: &str,
-    ) -> Result<()> {
+    pub async fn apply_edits(&self, kind: Kind, id: &str, batch: EditBatch) -> Result<bool> {
         let mut db = self.0.begin_with("BEGIN IMMEDIATE").await?;
+        let lyrics_edit = batch.lyrics.is_some();
         let before = snapshot(&mut db, kind, id).await?;
-        if before.is_empty() || (!field.is_empty() && !before.contains_key(field)) {
-            return Err(Error::msg("Unknown record or field"));
+        if before.is_empty() {
+            return Err(Error::msg("Unknown record"));
         }
-        match action {
-            "queue" => {
-                for key in before
-                    .keys()
-                    .filter(|key| field.is_empty() || key.as_str() == field)
-                {
-                    queue(&mut db, id, key, true).await?;
-                }
+        for field in &batch.refresh {
+            if !crate::enrichment::can_refresh(kind, field)
+                || !before.contains_key(field)
+                || batch.changes.contains_key(field)
+                || (field == "lyrics" && batch.lyrics.is_some())
+            {
+                return Err(Error::msg(
+                    "A queued field must support refresh and cannot also be edited",
+                ));
             }
-            "save" => {
-                if field.is_empty() {
-                    return Err(Error::msg("Select a field to edit"));
-                }
-                set_field(&mut db, kind, id, field, &serde_json::from_str(input)?).await?;
-                verify(&mut db, kind, id).await?;
-                audit(&mut db, kind, id, &before).await?;
+        }
+        for (field, value) in &batch.changes {
+            let Some(old) = before.get(field) else {
+                return Err(Error::msg("Unknown field"));
+            };
+            if old != value {
+                set_field(&mut db, kind, id, field, value).await?;
                 clear_job(&mut db, id, field).await?;
             }
-            "save_all" => {
-                let fields: Snapshot = serde_json::from_str(input)?;
-                for (key, value) in &fields {
-                    if before.get(key) != Some(value) {
-                        set_field(&mut db, kind, id, key, value).await?;
-                        clear_job(&mut db, id, key).await?;
-                    }
-                }
-                verify(&mut db, kind, id).await?;
-                audit(&mut db, kind, id, &before).await?;
+        }
+        if let Some(lyrics) = batch.lyrics {
+            if kind != Kind::Track || batch.changes.contains_key("lyrics") {
+                return Err(Error::msg(
+                    "Use either the language editor or structured lyrics",
+                ));
             }
-            "restore" => {
-                let minute: i64 = input.parse()?;
-                let changes: Vec<Revision> = sqlx::query_as(
-                    "SELECT field, minute, old_value, new_value FROM record_history
-                    WHERE record_id = ? AND minute > ? AND (? = '' OR field = ?)
-                    ORDER BY minute DESC, field",
-                )
-                .bind(id)
-                .bind(minute)
-                .bind(field)
-                .bind(field)
-                .fetch_all(&mut *db)
-                .await?;
-                let changes = changes
-                    .into_iter()
-                    .map(|value| (value.field, value.old_value))
-                    .collect::<BTreeMap<_, _>>();
-                for (key, value) in changes {
-                    set_field(&mut db, kind, id, &key, &serde_json::from_str(&value)?).await?;
-                    clear_job(&mut db, id, &key).await?;
-                }
-                verify(&mut db, kind, id).await?;
-                audit(&mut db, kind, id, &before).await?;
-            }
-            _ => return Err(Error::msg("Unknown editor action")),
+            set_lyrics(&mut db, id, &lyrics.language, &lyrics.text).await?;
+            clear_job(&mut db, id, "lyrics").await?;
+        }
+        verify(&mut db, kind, id).await?;
+        audit(&mut db, kind, id, &before, "Editor").await?;
+        for field in &batch.refresh {
+            queue(&mut db, id, field, true).await?;
         }
         db.commit().await?;
+        tracing::info!(
+            collection = kind.path(),
+            record_id = id,
+            fields = batch.changes.len(),
+            refreshes = batch.refresh.len(),
+            lyrics_edit,
+            "Record edits saved"
+        );
+        Ok(!batch.refresh.is_empty())
+    }
+
+    pub async fn queue_discography(&self, id: &str) -> Result<()> {
+        let mut db = self.0.begin_with("BEGIN IMMEDIATE").await?;
+        let exists: bool = query_scalar("SELECT EXISTS(SELECT 1 FROM artists WHERE id = ?)")
+            .bind(id)
+            .fetch_one(&mut *db)
+            .await?;
+        if !exists {
+            return Err(Error::msg("Unknown artist"));
+        }
+        queue(&mut db, id, "discography", true).await?;
+        db.commit().await?;
+        tracing::info!(record_id = id, "Artist discography queued");
         Ok(())
     }
 }
@@ -470,6 +525,9 @@ async fn set_field(
                     .clone();
                 if let Some((root, _)) = table.root.split_once(' ') {
                     row.insert(root.into(), Value::String(id.into()));
+                    if let Some(slot) = table.artwork_slot {
+                        row.insert("kind".into(), Value::String(slot.into()));
+                    }
                 } else {
                     let owner = row
                         .get("owner_id")
@@ -550,7 +608,7 @@ pub async fn finish_import(
     if before.is_empty() {
         seed(db, kind, id).await
     } else {
-        audit(db, kind, id, before).await
+        audit(db, kind, id, before, "MusicBrainz").await
     }
 }
 async fn clear_job(db: &mut SqliteConnection, id: &str, field: &str) -> Result<()> {

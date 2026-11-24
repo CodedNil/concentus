@@ -2,7 +2,7 @@ use crate::{
     records::{DatabaseRecord, read_by_id},
     store::Store,
 };
-use concentus_types::{Album, Artist, LookupOptions, RelatedData, Tag, Track};
+use concentus_types::{Album, Artist, LookupOptions, RelatedData, Track};
 use sqlx::{AssertSqlSafe, QueryBuilder, Sqlite, query_as};
 use topcoat::Result;
 
@@ -80,10 +80,48 @@ pub enum Detail {
     Artist(Artist),
     Album(Album),
     Track(Box<Track>),
-    Tag(Tag),
 }
 
 impl Store {
+    pub async fn popular_entries(&self, kind: Kind, after: &str, limit: u32) -> Result<Vec<Entry>> {
+        let columns = entry_columns(kind);
+        let sql = format!(
+            "WITH popularity AS MATERIALIZED (
+                SELECT record_id, sum(count) AS hits
+                FROM record_access_daily WHERE day >= unixepoch() / 86400 - 6
+                GROUP BY record_id
+            )
+            SELECT {columns} FROM {} AS item
+            LEFT JOIN popularity ON popularity.record_id = item.id
+            WHERE ?1 = '' OR (-coalesce(popularity.hits, 0), item.id) >
+                (-coalesce((SELECT hits FROM popularity WHERE record_id = ?1), 0), ?1)
+            ORDER BY coalesce(popularity.hits, 0) DESC, item.id LIMIT ?2",
+            kind.path()
+        );
+        Ok(query_as::<_, Entry>(AssertSqlSafe(sql))
+            .bind(after)
+            .bind(limit)
+            .fetch_all(&self.0)
+            .await?)
+    }
+
+    pub async fn recent_entries(&self, kind: Kind, limit: u32) -> Result<Vec<Entry>> {
+        let columns = entry_columns(kind);
+        let visibility = if kind == Kind::Tag {
+            "WHERE item.kind != 'Hidden'"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT {columns} FROM {} AS item {visibility} ORDER BY item.id DESC LIMIT ?",
+            kind.path()
+        );
+        Ok(query_as::<_, Entry>(AssertSqlSafe(sql))
+            .bind(limit)
+            .fetch_all(&self.0)
+            .await?)
+    }
+
     pub async fn entries(
         &self,
         kind: Kind,
@@ -104,7 +142,7 @@ impl Store {
             Some((Kind::Track, _)) if kind == Kind::Album => {
                 "EXISTS (SELECT 1 FROM album_discs AS disc JOIN disc_tracks AS track ON track.owner_id = disc.id WHERE disc.owner_id = item.id AND track.track_id = ?4)"
             }
-            Some((Kind::Tag, _)) if kind == Kind::Tag => "item.parent = ?4",
+            Some((Kind::Tag, _)) if kind == Kind::Tag => "item.related_id = ?4",
             Some((Kind::Tag, _)) => {
                 "EXISTS (SELECT 1 FROM record_tags WHERE owner_id = item.id AND tag_id = ?4)"
             }
@@ -121,7 +159,7 @@ impl Store {
             .map_or(("", input), |(artist, title)| (artist.trim(), title.trim()));
         let additional = match kind {
             Kind::Tag => {
-                "OR EXISTS (SELECT 1 FROM tag_aliases WHERE owner_id = item.id AND instr(lower(alias), lower(?1)) > 0)"
+                "OR EXISTS (SELECT 1 FROM tags AS alias WHERE alias.related_id = item.id AND alias.relation_kind = 'AliasOf' AND instr(lower(alias.name), lower(?1)) > 0)"
             }
             Kind::Artist => "OR instr(lower(coalesce(item.sort_name, '')), lower(?1)) > 0",
             _ => {
@@ -136,22 +174,37 @@ impl Store {
         } else {
             "OR EXISTS (SELECT 1 FROM external_ids WHERE owner_id = item.id AND value = ?1 COLLATE NOCASE)"
         };
+        let visibility = if kind == Kind::Tag {
+            "AND item.kind != 'Hidden'"
+        } else {
+            ""
+        };
+        let fts = search_terms(query);
+        let matches = if fts.is_empty() {
+            ""
+        } else {
+            "OR item.id IN (SELECT record_id FROM catalog_search WHERE catalog_search MATCH ?6 AND collection = ?7)"
+        };
         let sql = format!(
             "SELECT {columns} FROM {} AS item
-            WHERE (?1 = '' OR item.id = ?1 OR instr(lower(item.{title}), lower(?1)) > 0 {additional} {external})
+            WHERE (?1 = '' OR item.id = ?1 OR instr(lower(item.{title}), lower(?1)) > 0 {additional} {external} {matches})
             AND (?2 = '' OR instr(lower(coalesce(subtitle, '')), lower(?2)) > 0)
-            AND item.id > ?3 AND ({related})
+            AND item.id > ?3 AND ({related}) {visibility}
             ORDER BY item.id LIMIT ?5",
             kind.path()
         );
-        Ok(query_as::<_, Entry>(AssertSqlSafe(sql))
+        let statement = query_as::<_, Entry>(AssertSqlSafe(sql))
             .bind(query)
             .bind(artist)
             .bind(after)
             .bind(parent_id)
-            .bind(limit)
-            .fetch_all(&self.0)
-            .await?)
+            .bind(limit);
+        let statement = if fts.is_empty() {
+            statement
+        } else {
+            statement.bind(fts).bind(kind.path())
+        };
+        Ok(statement.fetch_all(&self.0).await?)
     }
 
     pub async fn entries_by_id(&self, kind: Kind, ids: &[String]) -> Result<Vec<Entry>> {
@@ -184,7 +237,7 @@ impl Store {
                 .await?
                 .map(Box::new)
                 .map(Detail::Track),
-            Kind::Tag => view_record(&mut db, id).await?.map(Detail::Tag),
+            Kind::Tag => None,
         };
         db.commit().await?;
         Ok(detail)
@@ -201,13 +254,12 @@ fn entry_columns(kind: Kind) -> String {
         _ => "NULL",
     };
     let image = match kind {
-        Kind::Artist => image_sql("item.id", "Portrait"),
-        Kind::Album => image_sql(album, "Cover"),
-        Kind::Track => format!(
+        Kind::Artist => format!(
             "coalesce({}, {})",
-            image_sql("item.id", "Cover"),
-            image_sql(album, "Cover")
+            image_sql("item.id", "Square"),
+            image_sql("item.id", "Portrait")
         ),
+        Kind::Album | Kind::Track => image_sql(album, "Square"),
         Kind::Tag => "NULL".into(),
     };
     let group = crate::enrichment::cover_art_archive::RELEASE_GROUP_PROVIDER;
@@ -221,7 +273,7 @@ fn image_sql(owner: &str, kind: &str) -> String {
         "(SELECT rendition.url FROM artwork AS art
         JOIN artwork_renditions AS rendition ON rendition.owner_id = art.id
         WHERE art.owner_id = {owner} AND art.kind = '{kind}' AND rendition.duration_ms IS NULL
-        ORDER BY art.explicit, art.position, rendition.position LIMIT 1)"
+        ORDER BY art.explicit, rendition.position LIMIT 1)"
     )
 }
 
@@ -268,6 +320,15 @@ const fn preview_sql(kind: Kind) -> &'static str {
         Kind::Track => "nullif(concat_ws(' · ', item.version, item.release_date,
             CASE WHEN item.duration_ms > 0 THEN printf('%d:%02d', item.duration_ms / 60000, item.duration_ms / 1000 % 60) END), '')",
         Kind::Tag => "nullif(concat_ws(' · ', item.kind,
-            (SELECT group_concat(alias, ', ') FROM tag_aliases WHERE owner_id = item.id)), '')",
+            (SELECT group_concat(alias.name, ', ') FROM tags AS alias WHERE alias.related_id = item.id AND alias.relation_kind = 'AliasOf')), '')",
     }
+}
+
+fn search_terms(query: &str) -> String {
+    query
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| format!("\"{word}\"*"))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }

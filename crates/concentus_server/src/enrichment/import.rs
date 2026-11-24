@@ -9,6 +9,45 @@ use sqlx::{SqliteConnection, query, query_scalar};
 use topcoat::Result;
 use uuid::Uuid;
 
+pub async fn albums(
+    db: &mut SqliteConnection,
+    artist_id: &str,
+    mut releases: Vec<Release>,
+) -> Result<()> {
+    let group_provider = format!("other:{RELEASE_GROUP_PROVIDER}");
+    let release_date =
+        |release: &Release| date(release.date.as_deref()).unwrap_or(PartialDate::Year(u16::MAX));
+    releases.sort_by(|a, b| {
+        release_date(a)
+            .cmp(&release_date(b))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    let mut groups = std::collections::HashSet::new();
+    for value in &releases {
+        if let Some(group) = value.group.as_ref().and_then(|group| group.id.as_deref()) {
+            if !groups.insert(group) {
+                continue;
+            }
+            let already_credited: bool = query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM external_ids AS external
+                 JOIN albums ON albums.id = external.owner_id
+                 JOIN credits ON credits.owner_id = albums.id
+                 WHERE external.provider = ? AND external.value = ? AND credits.artist_id = ?)",
+            )
+            .bind(&group_provider)
+            .bind(group)
+            .bind(artist_id)
+            .fetch_one(&mut *db)
+            .await?;
+            if already_credited {
+                continue;
+            }
+        }
+        release(db, value, false).await?;
+    }
+    Ok(())
+}
+
 pub async fn save(store: &Store, batch: Batch) -> Result<Vec<String>> {
     // Serialize identity resolution and writes across requests and processes.
     let mut db = store.0.begin_with("BEGIN IMMEDIATE").await?;
@@ -142,6 +181,9 @@ async fn artist(db: &mut SqliteConnection, artist: &Artist) -> Result<String> {
         external(db, &id, "Ipi", value).await?;
     }
     tags(db, &id, &artist.tags).await?;
+    if before.is_empty() {
+        editor::queue(db, &id, "discography", false).await?;
+    }
     editor::finish_import(db, Kind::Artist, &id, &before).await?;
     Ok(id)
 }
@@ -202,13 +244,10 @@ async fn release(
         && let Some(url) = front(&release.id, false)
     {
         let artwork: i64 = query_scalar(
-            "INSERT INTO artwork (owner_id, position, kind, explicit)
-            SELECT ?, coalesce(max(position) + 1, 0), 'Cover', 0 FROM artwork WHERE owner_id = ?
-            HAVING NOT EXISTS (SELECT 1 FROM artwork WHERE owner_id = ? AND kind = 'Cover')
+            "INSERT INTO artwork (owner_id, kind, explicit) VALUES (?, 'Square', 0)
+            ON CONFLICT (owner_id, kind) DO NOTHING
             RETURNING id",
         )
-        .bind(&id)
-        .bind(&id)
         .bind(&id)
         .fetch_optional(&mut *db)
         .await?
@@ -313,13 +352,13 @@ async fn tags(db: &mut SqliteConnection, id: &str, tags: &[SourceTag]) -> Result
         if weight == 0 {
             continue;
         }
-        let existing: Option<String> = query_scalar("SELECT id FROM tags WHERE trim(name) = trim(?) COLLATE NOCASE AND kind = 'Genre' ORDER BY id LIMIT 1")
+        let existing: Option<String> = query_scalar("SELECT CASE WHEN relation_kind = 'AliasOf' THEN related_id ELSE id END FROM tags WHERE trim(name) = trim(?) COLLATE NOCASE ORDER BY kind = 'Unclassified', id LIMIT 1")
             .bind(&tag.name).fetch_optional(&mut *db).await?;
         let tag_id = if let Some(id) = existing {
             id
         } else {
             let id = Uuid::now_v7().to_string();
-            query("INSERT INTO tags (id, name, kind) VALUES (?, ?, 'Genre')")
+            query("INSERT INTO tags (id, name, kind) VALUES (?, ?, 'Unclassified')")
                 .bind(&id)
                 .bind(&tag.name)
                 .execute(&mut *db)

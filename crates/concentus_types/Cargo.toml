@@ -4,12 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-jiff = { version = "1.0.2", default-features = false, features = ["std"] }
+jiff.workspace = true
 postcard.workspace = true
 serde.workspace = true
 serde_with = { version = "3.25.0", default-features = false, features = [
     "macros",
 ] }
-uuid = { version = "1.29.3", default-features = false, features = ["serde"] }
+uuid = { workspace = true, features = ["serde"] }
 [lints]
 workspace = true

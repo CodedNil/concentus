@@ -1,0 +1,143 @@
+.catalog-icon { display: block; width: 1.5rem; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.icon-orbit, .wave { transform-origin: center; }
+.icon-tag { transform-origin: 65% 33%; }
+:is(a:hover, a:focus-visible) .icon-orbit { animation: orbit 1.7s cubic-bezier(.25, .6, .4, 1); }
+:is(a:hover, a:focus-visible) .wave { animation: wave .65s ease-in-out 3 alternate; }
+:is(a:hover, a:focus-visible) .wave-mid { animation-delay: .12s; }
+:is(a:hover, a:focus-visible) .wave-low { animation-delay: .24s; }
+:is(a:hover, a:focus-visible, .tag-card-line:hover, .tag-card-line:focus-within) .icon-tag {
+    animation: tag-swing .85s ease-in-out;
+}
+@keyframes orbit { to { transform: rotate(360deg); } }
+@keyframes wave { 30% { transform: scaleY(.48); } 75% { transform: scaleY(1.15); } }
+@keyframes tag-swing {
+    30% { transform: rotate(-18deg); }
+    58% { transform: rotate(12deg); }
+    80% { transform: rotate(-5deg); }
+}
+
+.arrow { color: var(--tone); transition: transform .25s; }
+a:hover .arrow, a:focus-visible .arrow { transform: translate(.15rem, -.15rem); }
+.notice, .empty {
+    border: 1px solid var(--line);
+    padding: clamp(1rem, 3vw, 2rem);
+    border-radius: 1rem;
+    background: var(--glass);
+    box-shadow: var(--sheen);
+}
+.notice { margin-bottom: 1rem; padding-block: .75rem; color: var(--accent); }
+.empty { display: grid; gap: .4rem; }
+.empty p { color: var(--muted); }
+
+.panel { margin-bottom: 1.2rem; background: var(--glass); border: 1px solid var(--line); border-radius: 1rem; box-shadow: var(--sheen), 0 .65rem 2rem #15132835; }
+.panel-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: baseline; padding: .95rem 1.2rem; border-bottom: 1px solid var(--line); }
+
+.entries:is([data-kind="artists"], [data-kind="albums"]) {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 10.5rem), 1fr));
+    gap: .8rem;
+    padding: 1rem;
+}
+.entries[data-kind="tags"] > li + li { border-top: 1px solid var(--line); }
+.entry {
+    display: grid;
+    grid-template-columns: 2.8rem minmax(0, 1fr) auto;
+    align-items: center;
+    gap: .75rem;
+    padding: .65rem 1.2rem;
+    border-radius: .6rem;
+    color: inherit;
+    text-decoration: none;
+    transition: background .22s;
+}
+.entry:hover, .entry:focus-visible { background: color-mix(in srgb, var(--glow) 22%, transparent); }
+.entry small { display: block; overflow-wrap: anywhere; }
+.entry strong, .facts dd { overflow-wrap: anywhere; }
+.entry-icon, .cover { position: relative; display: block; min-width: 0; aspect-ratio: 1; }
+.art-face {
+    position: relative;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    width: 100%;
+    height: 100%;
+    border: 1px solid color-mix(in srgb, var(--tone) 24%, transparent);
+    border-radius: .6rem;
+    color: var(--tone);
+    background: radial-gradient(ellipse at 25% 10%, color-mix(in srgb, var(--glow) 65%, #382d52), #2c2948 84%);
+}
+.art-face svg { width: 45%; }
+.art-face img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.entries:is([data-kind="artists"], [data-kind="albums"]) .entry { grid-template-columns: minmax(0, 1fr) auto; align-items: start; padding: .65rem; }
+.entries:is([data-kind="artists"], [data-kind="albums"]) .entry-icon { grid-column: 1 / -1; }
+[data-kind="artists"] .art-face { border-radius: 50%; }
+.entries[data-kind="artists"] .entry-icon { width: 88%; justify-self: center; }
+.entries[data-kind="albums"] .entry-icon { width: 86%; }
+[data-kind="albums"] :is(.entry-icon, .cover)::before {
+    content: "";
+    position: absolute;
+    inset: 3%;
+    border-radius: 50%;
+    background: var(--record);
+    transform: translateX(14%) rotate(0);
+    transition: transform .4s cubic-bezier(.25, .7, .3, 1);
+}
+[data-kind="albums"] :is(.entry:hover, .entry:focus-visible) .entry-icon::before,
+.record-heading[data-kind="albums"]:hover .cover::before { transform: translateX(26%) rotate(22deg); }
+[data-kind="tracks"] .art-face { background: radial-gradient(ellipse at 32% 15%, #417e7b, #263d55 85%); }
+
+.chips, .palette { display: flex; gap: .7rem; flex-wrap: wrap; padding: .9rem 1.25rem; }
+.chips a { display: block; padding: .3rem .65rem; color: var(--accent); background: #2c2239; border: 1px solid #534064; border-radius: 1.5rem; text-decoration: none; }
+.has-tip { position: relative; display: inline-block; }
+.entry.has-tip { display: grid; }
+.tip { position: absolute; z-index: 5; bottom: 100%; left: 0; width: max-content; max-width: min(15rem, 70vw); padding: .55rem .7rem; background: #21182c; color: #f4f5ec; border: 1px solid #715683; border-radius: .4rem; box-shadow: 0 .4rem 1rem #0005; display: none; overflow-wrap: anywhere; }
+.tip small { display: block; }
+.has-tip:hover .tip, .has-tip:focus-within .tip { display: block; }
+
+.entry .tip { max-width: min(15rem, 100%); }
+
+@media (max-width: 43rem) {
+    .entries:is([data-kind="artists"], [data-kind="albums"]) {
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 8rem), 1fr));
+        gap: .4rem;
+        padding: .55rem;
+    }
+}
+
+.entries[data-kind="tracks"] {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 11rem), 1fr));
+    gap: .8rem;
+    padding: 1rem;
+}
+.entries[data-kind="tracks"] > li { border: 0; min-width: 0; }
+.entries[data-kind="tracks"] .entry {
+    height: 100%;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-content: start;
+    padding: .55rem;
+    border: 1px solid color-mix(in srgb, var(--tone) 22%, transparent);
+    background: linear-gradient(145deg, #55c5ae19, transparent);
+}
+.entries[data-kind="tracks"] .entry:hover,
+.entries[data-kind="tracks"] .entry:focus-visible {
+    border-color: var(--tone);
+    background: #55c5ae24;
+}
+.entries[data-kind="tracks"] .entry-icon {
+    grid-column: 1 / -1;
+    aspect-ratio: 16 / 9;
+}
+.entries[data-kind="tracks"] .art-face {
+    background: repeating-linear-gradient(90deg, transparent 0 12%, #9ff7df18 12% 12.5%, transparent 12.5% 15%),
+        radial-gradient(ellipse at 25% 0, #417e7b, #263d55 85%);
+}
+.entries[data-kind="tracks"] .art-face svg { width: 32%; max-height: 74%; }
+.entries[data-kind="tracks"] .art-face img { object-position: center; }
+@media (max-width: 43rem) {
+    .entries[data-kind="tracks"] {
+        grid-template-columns: repeat(auto-fill, minmax(min(100%, 8rem), 1fr));
+        gap: .45rem;
+        padding: .55rem;
+    }
+}

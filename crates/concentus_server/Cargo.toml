@@ -5,11 +5,11 @@ edition.workspace = true
 
 [dependencies]
 # API encoding
-concentus_types = { path = "../concentus_types" }
+concentus_types.workspace = true
 
 # Local storage
 directories = "6"
-jiff = { version = "1.0.2", default-features = false, features = ["std"] }
+jiff.workspace = true
 sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "sqlite-bundled",
@@ -26,9 +26,13 @@ serde.workspace = true
 serde-value = "0.7"
 serde_json = "1"
 
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 # Web
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
-uuid = { version = "1.29", features = ["v7"] }
+reqwest = { workspace = true, features = ["json"] }
+uuid = { workspace = true, features = ["std", "v7"] }
 topcoat = { version = "0.12.1", default-features = false, features = [
     "router",
     "view",

@@ -17,6 +17,7 @@ struct Job {
 
 impl Enrichment {
     pub fn worker(self, store: Store) {
+        tracing::info!(interval_seconds = 60, "Enrichment worker started");
         tokio::spawn(async move {
             let mut ticker = interval(Duration::from_secs(60));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -25,7 +26,7 @@ impl Enrichment {
             loop {
                 tokio::select! { _ = ticker.tick() => {}, () = self.wake.notified() => {} }
                 if let Err(error) = self.work(&store).await {
-                    eprintln!("Enrichment queue failed: {error}");
+                    tracing::error!(%error, "Enrichment pass failed");
                 }
             }
         });
@@ -39,6 +40,11 @@ impl Enrichment {
         )
         .fetch_all(&store.0)
         .await?;
+        if jobs.is_empty() {
+            tracing::debug!("No enrichment jobs due");
+            return Ok(());
+        }
+        tracing::info!(jobs = jobs.len(), "Processing enrichment queue");
         let mut grouped = BTreeMap::<(&str, &str), Vec<&Job>>::new();
         for job in &jobs {
             grouped
@@ -50,9 +56,12 @@ impl Enrichment {
             let Some(kind) = Kind::parse(collection) else {
                 continue;
             };
+            let (discography, fields): (Vec<_>, Vec<_>) = jobs
+                .into_iter()
+                .partition(|job| kind == Kind::Artist && job.field == "discography");
             let (mut base, mut artist, mut lyrics, mut unsupported) =
                 (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            for job in jobs {
+            for job in fields {
                 match source_for(kind, &job.field) {
                     Some(Provider::MusicBrainz) => base.push(job),
                     Some(Provider::Wikidata) => artist.push(job),
@@ -61,7 +70,7 @@ impl Enrichment {
                 }
             }
             if !base.is_empty() {
-                let result = self.base(store, kind, id, &base).await;
+                let result = self.base(store, kind, id, &base).await.map(|()| true);
                 finish(store, base, result).await?;
             }
             if !artist.is_empty() {
@@ -73,15 +82,14 @@ impl Enrichment {
                     wikidata::enrich(&self.wikidata, &self.musicbrainz, store, id, &fields).await;
                 match result {
                     Ok(file) => {
-                        let (artwork, metadata) =
-                            artist.into_iter().partition(|job| job.field == "artwork");
-                        finish(store, metadata, Ok(())).await?;
+                        let (artwork, metadata) = artist
+                            .into_iter()
+                            .partition(|job| job.field == "artwork_portrait");
+                        finish(store, metadata, Ok(true)).await?;
                         let result = if let Some(file) = file {
-                            wikimedia_commons::enrich(&self.commons, store, id, &file)
-                                .await
-                                .map(|_| ())
+                            wikimedia_commons::enrich(&self.commons, store, id, &file).await
                         } else {
-                            Ok(())
+                            Ok(false)
                         };
                         finish(store, artwork, result).await?;
                     }
@@ -89,38 +97,46 @@ impl Enrichment {
                 }
             }
             if let Some(job) = lyrics.first() {
-                let result = lrclib::enrich(&self.lrclib, store, id, job.refresh, job.generation)
-                    .await
-                    .map(|_| ());
+                let result =
+                    lrclib::enrich(&self.lrclib, store, id, job.refresh, job.generation).await;
                 finish(store, lyrics, result).await?;
             }
-            finish(store, unsupported, Ok(())).await?;
+            finish(store, unsupported, Ok(false)).await?;
+            if let Some(job) = discography.first() {
+                let result = self.discography(store, job).await.map(|()| true);
+                finish(store, discography, result).await?;
+            }
         }
         Ok(())
     }
 
+    async fn discography(&self, store: &Store, job: &Job) -> Result<()> {
+        let Some(mbid) = musicbrainz_id(store, &job.record_id).await? else {
+            return Ok(());
+        };
+        let releases = self.musicbrainz.albums_by_artist(mbid).await?;
+        tracing::debug!(
+            record_id = job.record_id,
+            releases = releases.len(),
+            "Fetched artist discography"
+        );
+        let mut db = store.0.begin_with("BEGIN IMMEDIATE").await?;
+        if active(&mut db, job).await? {
+            import::albums(&mut db, &job.record_id, releases).await?;
+        }
+        db.commit().await?;
+        Ok(())
+    }
+
     async fn base(&self, store: &Store, kind: Kind, id: &str, jobs: &[&Job]) -> Result<()> {
-        let mbid: Option<String> = query_scalar("SELECT value FROM external_ids WHERE owner_id = ? AND provider = 'Musicbrainz' ORDER BY value LIMIT 1")
-            .bind(id)
-            .fetch_optional(&store.0)
-            .await?;
-        let Some(mbid) = mbid.and_then(|value| value.parse().ok()) else {
+        let Some(mbid) = musicbrainz_id(store, id).await? else {
             return Ok(());
         };
         let batch = self.musicbrainz.entity(kind, mbid).await?;
         let mut db = store.0.begin_with("BEGIN IMMEDIATE").await?;
         let mut fields = BTreeMap::new();
         for job in jobs {
-            let active: bool = query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM enrichment_needed WHERE
-                record_id = ? AND field = ? AND generation = ?)",
-            )
-            .bind(id)
-            .bind(&job.field)
-            .bind(job.generation)
-            .fetch_one(&mut *db)
-            .await?;
-            if active {
+            if active(&mut db, job).await? {
                 fields.insert(
                     job.field.as_str(),
                     if job.refresh {
@@ -141,28 +157,95 @@ impl Enrichment {
     }
 }
 
-async fn finish(store: &Store, jobs: Vec<&Job>, result: Result<()>) -> Result<()> {
-    let error = result.err().filter(|error| {
-        error
-            .downcast_ref::<reqwest::Error>()
-            .and_then(reqwest::Error::status)
-            != Some(reqwest::StatusCode::NOT_FOUND)
-    });
-    let sql = error.map_or(
-        "DELETE FROM enrichment_needed WHERE record_id = ? AND field = ? AND generation = ?",
-        |error| {
-            eprintln!("Enrichment attempt deferred: {error}");
-            "UPDATE enrichment_needed SET due_at = unixepoch() + 60 WHERE record_id = ? AND field = ? AND generation = ?"
-        },
-    );
-    for job in jobs {
-        query(sql)
-            .bind(&job.record_id)
-            .bind(&job.field)
-            .bind(job.generation)
-            .execute(&store.0)
-            .await?;
+async fn musicbrainz_id(store: &Store, id: &str) -> Result<Option<uuid::Uuid>> {
+    let value: Option<String> = query_scalar(
+        "SELECT value FROM external_ids WHERE owner_id = ? AND provider = 'Musicbrainz' ORDER BY value LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&store.0)
+    .await?;
+    Ok(value.and_then(|value| value.parse().ok()))
+}
+
+async fn active(db: &mut sqlx::SqliteConnection, job: &Job) -> Result<bool> {
+    Ok(query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM enrichment_needed WHERE
+        record_id = ? AND field = ? AND generation = ?)",
+    )
+    .bind(&job.record_id)
+    .bind(&job.field)
+    .bind(job.generation)
+    .fetch_one(db)
+    .await?)
+}
+
+async fn finish(store: &Store, jobs: Vec<&Job>, result: Result<bool>) -> Result<()> {
+    if jobs.is_empty() {
+        return Ok(());
     }
+    let outcome = match result {
+        Ok(true) => "Checked",
+        Ok(false) => "No new data",
+        Err(error)
+            if error
+                .downcast_ref::<reqwest::Error>()
+                .and_then(reqwest::Error::status)
+                == Some(reqwest::StatusCode::NOT_FOUND) =>
+        {
+            "No result"
+        }
+        Err(error) => {
+            let job = jobs[0];
+            tracing::warn!(collection = job.collection, record_id = job.record_id, fields = jobs.len(), %error, retry_seconds = 60, "Enrichment retry scheduled");
+            let mut db = store.0.begin().await?;
+            let description = error.to_string();
+            for job in jobs {
+                query(
+                    "UPDATE enrichment_needed SET due_at = unixepoch() + 60, last_error = ?
+                    WHERE record_id = ? AND field = ? AND generation = ?",
+                )
+                .bind(&description)
+                .bind(&job.record_id)
+                .bind(&job.field)
+                .bind(job.generation)
+                .execute(&mut *db)
+                .await?;
+            }
+            db.commit().await?;
+            return Ok(());
+        }
+    };
+    let mut db = store.0.begin().await?;
+    for job in jobs {
+        let provider = match (
+            Kind::parse(&job.collection).and_then(|kind| source_for(kind, &job.field)),
+            job.field.as_str(),
+        ) {
+            (Some(Provider::MusicBrainz), _) | (None, "discography") => Some("MusicBrainz"),
+            (Some(Provider::Wikidata), "artwork_portrait") => Some("Wikidata / Wikimedia Commons"),
+            (Some(Provider::Wikidata), _) => Some("Wikidata"),
+            (Some(Provider::Lrclib), _) => Some("LRCLIB"),
+            (None, _) => None,
+        };
+        let removed = query(
+            "DELETE FROM enrichment_needed WHERE record_id = ? AND field = ? AND generation = ?",
+        )
+        .bind(&job.record_id)
+        .bind(&job.field)
+        .bind(job.generation)
+        .execute(&mut *db)
+        .await?;
+        if let Some(provider) = provider
+            && removed.rows_affected() > 0
+        {
+            query("INSERT INTO record_history (record_id, field, minute, old_value, new_value, checked_at, check_source, outcome)
+                   VALUES (?, ?, unixepoch() / 60, 'null', 'null', unixepoch(), ?, ?)
+                   ON CONFLICT (record_id, field, minute) DO UPDATE SET
+                       checked_at = excluded.checked_at, check_source = excluded.check_source, outcome = excluded.outcome")
+                .bind(&job.record_id).bind(&job.field).bind(provider).bind(outcome).execute(&mut *db).await?;
+        }
+    }
+    db.commit().await?;
     Ok(())
 }
 
@@ -172,17 +255,22 @@ enum Provider {
     Lrclib,
 }
 
+pub fn can_refresh(kind: Kind, field: &str) -> bool {
+    source_for(kind, field).is_some()
+}
+
 fn source_for(kind: Kind, field: &str) -> Option<Provider> {
     match (kind, field) {
-        (Kind::Artist, "artwork" | "biography" | "begin_date" | "end_date" | "external_ids") => {
-            Some(Provider::Wikidata)
-        }
+        (
+            Kind::Artist,
+            "artwork_portrait" | "biography" | "begin_date" | "end_date" | "external_ids",
+        ) => Some(Provider::Wikidata),
         (Kind::Track, "lyrics") => Some(Provider::Lrclib),
         (Kind::Artist, "name" | "sort_name" | "kind" | "origin" | "tags")
         | (
             Kind::Album,
             "title" | "album_type" | "release_date" | "label" | "discs" | "credits"
-            | "external_ids" | "tags" | "artwork",
+            | "external_ids" | "tags" | "artwork_square",
         )
         | (
             Kind::Track,

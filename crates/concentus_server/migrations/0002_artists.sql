@@ -36,3 +36,16 @@ CREATE TABLE member_roles (
     role_detail TEXT,
     PRIMARY KEY (owner_id, position)
 ) STRICT, WITHOUT ROWID;
+
+-- Catalog full-text search
+CREATE TRIGGER search_artists_insert AFTER INSERT ON artists BEGIN
+    INSERT INTO catalog_search (record_id, collection, title) VALUES (new.id, 'artists', new.name);
+END;
+CREATE TRIGGER search_artists_update AFTER UPDATE OF id, name ON artists
+WHEN old.id IS NOT new.id OR old.name IS NOT new.name BEGIN
+    DELETE FROM catalog_search WHERE record_id = old.id AND collection = 'artists';
+    INSERT INTO catalog_search (record_id, collection, title) VALUES (new.id, 'artists', new.name);
+END;
+CREATE TRIGGER search_artists_delete AFTER DELETE ON artists BEGIN
+    DELETE FROM catalog_search WHERE record_id = old.id AND collection = 'artists';
+END;

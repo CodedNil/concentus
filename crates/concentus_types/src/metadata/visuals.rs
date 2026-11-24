@@ -6,8 +6,6 @@ use std::{fmt, str::FromStr};
 /// One piece of artwork in every size and format available, still or animated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Artwork {
-    /// What the artwork shows.
-    pub kind: ArtworkKind,
     /// True if the artwork itself is explicit; a clean alternate may exist.
     pub explicit: bool,
 
@@ -18,31 +16,6 @@ pub struct Artwork {
     pub colors: Vec<Rgb>,
     /// Compact placeholder to show while loading.
     pub blurhash: Option<String>,
-}
-
-impl Artwork {
-    pub(super) fn preferred(artwork: &[Self], kind: ArtworkKind) -> Option<&Self> {
-        artwork
-            .iter()
-            .filter(|art| art.kind == kind)
-            .min_by_key(|art| art.explicit)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ArtworkKind {
-    /// Front cover.
-    Cover,
-    /// Back cover.
-    Back,
-    /// Portrait of an artist.
-    Portrait,
-    /// Wide header image.
-    Banner,
-    /// Logo or wordmark.
-    Logo,
-    /// Short vertical loop shown behind a playing track.
-    Canvas,
 }
 
 /// One file of an artwork: an image, or a video loop when it has a duration.

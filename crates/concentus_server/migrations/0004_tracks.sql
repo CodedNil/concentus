@@ -83,3 +83,16 @@ CREATE TABLE channel_spans (
     PRIMARY KEY (owner_id, position),
     CHECK (end_ms >= start_ms)
 ) STRICT, WITHOUT ROWID;
+
+-- Catalog full-text search
+CREATE TRIGGER search_tracks_insert AFTER INSERT ON tracks BEGIN
+    INSERT INTO catalog_search (record_id, collection, title) VALUES (new.id, 'tracks', new.title);
+END;
+CREATE TRIGGER search_tracks_update AFTER UPDATE OF id, title ON tracks
+WHEN old.id IS NOT new.id OR old.title IS NOT new.title BEGIN
+    DELETE FROM catalog_search WHERE record_id = old.id AND collection = 'tracks';
+    INSERT INTO catalog_search (record_id, collection, title) VALUES (new.id, 'tracks', new.title);
+END;
+CREATE TRIGGER search_tracks_delete AFTER DELETE ON tracks BEGIN
+    DELETE FROM catalog_search WHERE record_id = old.id AND collection = 'tracks';
+END;

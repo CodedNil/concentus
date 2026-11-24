@@ -34,3 +34,16 @@ CREATE TABLE disc_tracks (
     PRIMARY KEY (owner_id, position)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX disc_tracks_track ON disc_tracks (track_id, owner_id);
+
+-- Catalog full-text search
+CREATE TRIGGER search_albums_insert AFTER INSERT ON albums BEGIN
+    INSERT INTO catalog_search (record_id, collection, title) VALUES (new.id, 'albums', new.title);
+END;
+CREATE TRIGGER search_albums_update AFTER UPDATE OF id, title ON albums
+WHEN old.id IS NOT new.id OR old.title IS NOT new.title BEGIN
+    DELETE FROM catalog_search WHERE record_id = old.id AND collection = 'albums';
+    INSERT INTO catalog_search (record_id, collection, title) VALUES (new.id, 'albums', new.title);
+END;
+CREATE TRIGGER search_albums_delete AFTER DELETE ON albums BEGIN
+    DELETE FROM catalog_search WHERE record_id = old.id AND collection = 'albums';
+END;

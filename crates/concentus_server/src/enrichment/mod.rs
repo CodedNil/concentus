@@ -6,6 +6,7 @@ mod import;
 mod lrclib;
 mod musicbrainz;
 mod queue;
+pub use queue::can_refresh;
 mod wikidata;
 mod wikimedia_commons;
 
@@ -75,6 +76,7 @@ impl Enrichment {
         let enrichment = self.clone();
         tokio::spawn(async move {
             let Ok(_guard) = enrichment.search.try_lock() else {
+                tracing::debug!("Search skipped because another provider search is active");
                 let _ = updates.send(Update::Unavailable).await;
                 return;
             };
@@ -96,7 +98,7 @@ impl Enrichment {
                     let _ = updates.send(Update::Results(kind, ids)).await;
                 }
                 Err(error) => {
-                    eprintln!("MusicBrainz {} search failed: {error}", kind.path());
+                    tracing::warn!(collection = kind.path(), %error, "MusicBrainz search failed");
                     let _ = updates.send(Update::Unavailable).await;
                 }
             }
@@ -104,8 +106,15 @@ impl Enrichment {
     }
 
     async fn search_import(&self, store: &Store, kind: Kind, query: &str) -> Result<Vec<String>> {
+        tracing::info!(collection = kind.path(), "Searching MusicBrainz");
         let batch = self.musicbrainz.search(kind, query).await?;
-        import::save(store, batch).await
+        let ids = import::save(store, batch).await?;
+        tracing::info!(
+            collection = kind.path(),
+            records = ids.len(),
+            "MusicBrainz search imported"
+        );
+        Ok(ids)
     }
 
     pub async fn discover(&self, store: &Store, kind: Kind, seed: Discovery) {
@@ -120,8 +129,12 @@ impl Enrichment {
             }
             Ok::<(), topcoat::Error>(())
         };
-        if let Ok(Err(error)) = timeout(Duration::from_secs(4), operation).await {
-            eprintln!("MusicBrainz API lookup failed: {error}");
+        match timeout(Duration::from_secs(4), operation).await {
+            Ok(Ok(())) => tracing::debug!(collection = kind.path(), "API discovery completed"),
+            Ok(Err(error)) => {
+                tracing::warn!(collection = kind.path(), %error, "API discovery failed");
+            }
+            Err(_) => tracing::warn!(collection = kind.path(), "API discovery timed out"),
         }
     }
 }

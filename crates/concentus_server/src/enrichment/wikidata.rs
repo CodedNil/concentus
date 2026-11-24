@@ -186,14 +186,23 @@ pub async fn enrich(
                 .bind(id).bind(isni).execute(&mut *db).await?;
         }
     }
-    crate::editor::audit(&mut db, crate::catalog::Kind::Artist, id, &before).await?;
+    crate::editor::audit(
+        &mut db,
+        crate::catalog::Kind::Artist,
+        id,
+        &before,
+        "Wikidata",
+    )
+    .await?;
     db.commit().await?;
-    Ok((fields.contains(&"artwork") && !candidate.has_portrait)
-        .then(|| {
-            entity
-                .values("P18")
-                .find_map(Value::as_str)
-                .map(str::to_owned)
-        })
-        .flatten())
+    Ok(
+        (fields.contains(&"artwork_portrait") && !candidate.has_portrait)
+            .then(|| {
+                entity
+                    .values("P18")
+                    .find_map(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .flatten(),
+    )
 }

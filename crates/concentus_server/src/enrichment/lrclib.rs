@@ -122,7 +122,7 @@ pub async fn enrich(
     }
     query("INSERT INTO external_ids (owner_id, provider, value) VALUES (?, 'other:LRCLIB', ?) ON CONFLICT DO NOTHING")
         .bind(id).bind(response.id.to_string()).execute(&mut *db).await?;
-    crate::editor::audit(&mut db, crate::catalog::Kind::Track, id, &before).await?;
+    crate::editor::audit(&mut db, crate::catalog::Kind::Track, id, &before, "LRCLIB").await?;
     db.commit().await?;
     Ok(true)
 }

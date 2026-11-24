@@ -11,8 +11,12 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+concentus_types = { path = "crates/concentus_types" }
+jiff = { version = "1.0.3", default-features = false, features = ["std"] }
 postcard = { version = "1.2.0", default-features = false, features = ["alloc"] }
+reqwest = { version = "0.13", default-features = false, features = ["query", "rustls"] }
 serde = { version = "1", features = ["derive"] }
+uuid = { version = "1.29.3", default-features = false }
 
 [profile.release]
 lto = "fat"

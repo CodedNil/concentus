@@ -1,0 +1,120 @@
+.page-heading, .record-heading {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    display: grid;
+    align-items: center;
+    padding: clamp(1.5rem, 4vw, 3.5rem);
+    border: 1px solid color-mix(in srgb, var(--tone) 28%, var(--line));
+    border-radius: 1.5rem;
+    background: radial-gradient(ellipse at 94% 0, color-mix(in srgb, var(--glow) 54%, transparent), transparent 67%),
+        linear-gradient(125deg, #302643, #353655);
+    box-shadow: var(--sheen), 0 .8rem 2.8rem #19142c44;
+    margin-bottom: 1.5rem;
+}
+.page-heading { min-height: clamp(10rem, 24vw, 17rem); }
+.page-heading:has(.hero-record) {
+    min-height: clamp(15rem, 31vw, 25rem);
+    background:
+        repeating-linear-gradient(125deg, transparent 0 25px, #dfb7ff0d 26px, transparent 27px 35px),
+        radial-gradient(ellipse at 77% 15%, #c778c9a3, transparent 65%),
+        radial-gradient(ellipse at 100% 100%, #628bd5, transparent 55%),
+        linear-gradient(115deg, #452c63, #573475 55%, #6756a5);
+}
+.heading-copy { position: relative; min-width: 0; }
+.page-heading:has(.hero-record) .heading-copy { max-width: 57%; }
+.heading-description { color: #e1d4e9; margin-top: 1.2rem; max-width: 34ch; }
+
+.hero-record {
+    position: absolute;
+    z-index: -1;
+    top: 50%;
+    right: 3%;
+    width: clamp(13rem, 37vw, 32rem);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    border: 1px solid #b595aa80;
+    background: var(--record);
+    box-shadow: 0 .75rem 3rem #271338a8, 0 0 0 1rem #f3b8ff22, 0 0 0 2rem #f3b8ff14,
+        0 0 4rem #ffc7f075;
+    transform: translateY(-50%) rotate(-16deg);
+    animation: vinyl-turn 14s linear infinite;
+}
+@keyframes vinyl-turn {
+    to { transform: translateY(-50%) rotate(344deg); }
+}
+.heading-art {
+    position: absolute;
+    z-index: -1;
+    right: 4%;
+    color: var(--tone);
+    opacity: .36;
+    filter: drop-shadow(0 0 1rem var(--glow));
+    transform: rotate(-13deg);
+}
+.heading-art svg { width: clamp(7rem, 17vw, 16rem); stroke-width: .75; }
+[data-kind="artists"]:is(.page-heading, .record-heading) {
+    background: radial-gradient(ellipse at 83% 5%, #a45ebf, transparent 65%), linear-gradient(135deg, #473057, #59448b);
+}
+[data-kind="albums"]:is(.page-heading, .record-heading) {
+    background: radial-gradient(ellipse at 84% 0%, #bb734e, transparent 66%), linear-gradient(135deg, #4a3049, #824a64);
+}
+[data-kind="tracks"]:is(.page-heading, .record-heading) {
+    background:
+        repeating-linear-gradient(90deg, transparent 0 27px, #91ffe310 28px, transparent 29px 44px),
+        radial-gradient(ellipse at 83% 10%, #29887e, transparent 68%), linear-gradient(135deg, #223d52, #325e71);
+}
+
+@media (max-width: 43rem) {
+    .page-heading:has(.hero-record) .heading-copy { max-width: 75%; }
+    .hero-record { right: -5.5rem; opacity: .45; }
+    .heading-description { font-size: .9rem; }
+}
+
+:is(.page-heading, .record-heading)::before {
+    content: "";
+    position: absolute;
+    z-index: -2;
+    inset: -40% -12%;
+    pointer-events: none;
+    background: radial-gradient(ellipse at center, color-mix(in srgb, var(--tone) 42%, transparent), transparent 63%);
+    opacity: .48;
+    transform: translateX(22%);
+    animation: header-light 8s ease-in-out infinite alternate;
+}
+.heading-art {
+    animation: header-float 5s ease-in-out infinite;
+}
+.heading-art .icon-orbit {
+    animation: orbit 11s linear infinite;
+}
+[data-kind="albums"] .heading-art .icon-orbit {
+    animation-duration: 7s;
+}
+.heading-art .wave {
+    animation: header-wave 1.35s ease-in-out infinite;
+}
+.heading-art .wave-mid { animation-delay: -.21s; }
+.heading-art .wave-low { animation-delay: -.48s; }
+.heading-art .icon-tag {
+    animation: header-tag 2.8s ease-in-out infinite;
+}
+
+@keyframes header-light {
+    from { transform: translate(30%, -18%) scale(.85); opacity: .28; }
+    to { transform: translate(3%, 12%) scale(1.12); opacity: .62; }
+}
+@keyframes header-float {
+    0%, 100% { translate: 0 .35rem; scale: .98; }
+    50% { translate: -.5rem -.65rem; scale: 1.06; }
+}
+@keyframes header-wave {
+    0%, 100% { transform: scaleY(.58); }
+    28% { transform: scaleY(1.24); }
+    53% { transform: scaleY(.38); }
+    77% { transform: scaleY(.98); }
+}
+@keyframes header-tag {
+    0%, 100% { transform: rotate(-12deg); }
+    50% { transform: rotate(18deg); }
+}

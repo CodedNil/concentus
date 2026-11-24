@@ -72,7 +72,7 @@ fn list<T: DatabaseRecord>(cx: &Cx, body: Body) -> RouteFuture<'_> {
 fn get<T: DatabaseRecord>(cx: &Cx, _body: Body) -> RouteFuture<'_> {
     Box::pin(async move {
         match store(cx).get::<T>(id(cx)).await {
-            Ok(Some(record)) => postcard(StatusCode::OK, &record),
+            Ok(Some(record)) => accessed::<T>(cx, id(cx), &record),
             Ok(None) => error(StatusCode::NOT_FOUND, "Record not found."),
             Err(cause) => store_error(&cause),
         }
@@ -115,18 +115,37 @@ fn lookup<T: DatabaseRecord>(cx: &Cx, body: Body) -> RouteFuture<'_> {
         if matches!(result, Ok(LookupMatch::Missing))
             && let (Some(kind), Some(seed)) = (kind, seed)
         {
+            tracing::info!(
+                collection = T::NAME,
+                "Lookup missed locally, trying enrichment"
+            );
             let enrichment: &Enrichment = context(cx);
             enrichment.discover(db, kind, seed).await;
             result = db.lookup::<T>(&criteria).await;
         }
+        let outcome = match &result {
+            Ok(LookupMatch::Found(..)) => "found",
+            Ok(LookupMatch::Missing) => "missing",
+            Ok(LookupMatch::Ambiguous) => "ambiguous",
+            Err(_) => "error",
+        };
+        tracing::info!(collection = T::NAME, outcome, "Catalog lookup completed");
         match result {
-            Ok(LookupMatch::Found(record)) => postcard(StatusCode::OK, &Some(record)),
+            Ok(LookupMatch::Found(id, record)) => accessed::<T>(cx, &id, &Some(record)),
             Ok(LookupMatch::Missing | LookupMatch::Ambiguous) => {
                 postcard(StatusCode::OK, &Option::<T>::None)
             }
             Err(cause) => store_error(&cause),
         }
     })
+}
+
+fn accessed<T: DatabaseRecord>(cx: &Cx, id: &str, record: &impl Serialize) -> Result<Response> {
+    let response = postcard(StatusCode::OK, record)?;
+    if Kind::parse(T::NAME).is_some_and(|kind| Kind::MUSIC.contains(&kind)) {
+        store(cx).record_access(id);
+    }
+    Ok(response)
 }
 
 fn postcard(status: StatusCode, message: &impl Serialize) -> Result<Response> {
@@ -148,7 +167,7 @@ fn error(status: StatusCode, message: &str) -> Result<Response> {
 }
 
 fn store_error(cause: &topcoat::Error) -> Result<Response> {
-    eprintln!("Catalog API storage error: {cause}");
+    tracing::error!(error = %cause, "Catalog API storage error");
     error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "The catalog store failed.",

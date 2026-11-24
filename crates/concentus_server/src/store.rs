@@ -1,3 +1,4 @@
+use crate::access::AccessLog;
 use crate::{
     lookup::SqlLookup,
     records::{DatabaseRecord, read_by_id},
@@ -7,7 +8,7 @@ use sqlx::{
     migrate::Migrator,
     sqlite::{SqliteConnectOptions, SqliteJournalMode},
 };
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 use topcoat::{
     Result,
     context::{Cx, context},
@@ -18,14 +19,22 @@ const MAX_PAGE: u32 = 100;
 pub enum LookupMatch<T> {
     Missing,
     Ambiguous,
-    Found(T),
+    Found(String, T),
 }
 
 /// The local catalog database.
 #[derive(Clone)]
-pub struct Store(pub(crate) SqlitePool);
+pub struct Store(pub(crate) SqlitePool, Arc<AccessLog>);
 
 impl Store {
+    pub fn record_access(&self, id: &str) {
+        self.1.record(id);
+    }
+
+    pub async fn flush_access(&self) {
+        self.1.flush(self).await;
+    }
+
     pub async fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
@@ -36,7 +45,7 @@ impl Store {
             .journal_mode(SqliteJournalMode::Wal);
         let pool = SqlitePool::connect_with(options).await?;
         MIGRATIONS.run(&pool).await?;
-        Ok(Self(pool))
+        Ok(Self(pool, Arc::default()))
     }
 
     pub async fn lookup<T: DatabaseRecord>(&self, lookup: &SqlLookup) -> Result<LookupMatch<T>> {
@@ -86,11 +95,11 @@ impl Store {
                     if found.is_some() {
                         return Ok(LookupMatch::Ambiguous);
                     }
-                    found = Some(record);
+                    found = Some((cursor.clone(), record));
                 }
             }
             if !full {
-                if let Some(record) = &mut found {
+                if let Some((_, record)) = &mut found {
                     match (lookup.options.lyrics, lyrics_filter) {
                         (true, false) => record.load_lyrics(&mut db).await?,
                         (false, true) => record.omit_lyrics(),
@@ -99,7 +108,9 @@ impl Store {
                     record.select_relations(&mut db, lookup.options).await?;
                 }
                 db.commit().await?;
-                return Ok(found.map_or(LookupMatch::Missing, LookupMatch::Found));
+                return Ok(found.map_or(LookupMatch::Missing, |(id, record)| {
+                    LookupMatch::Found(id, record)
+                }));
             }
         }
     }
