@@ -102,9 +102,9 @@ pub async fn enrich(
 ) -> Result<Option<String>> {
     let candidate: Option<Candidate> = sqlx::query_as(
         "SELECT artist.kind,
-        (SELECT value FROM artist_external_ids WHERE owner_id = artist.id AND provider = 'Wikidata' ORDER BY value LIMIT 1) AS wikidata,
-        (SELECT value FROM artist_external_ids WHERE owner_id = artist.id AND provider = 'Musicbrainz' ORDER BY value LIMIT 1) AS musicbrainz,
-        EXISTS(SELECT 1 FROM artist_artwork WHERE owner_id = artist.id AND kind = 'Portrait') AS has_portrait
+        (SELECT value FROM external_ids WHERE owner_id = artist.id AND provider = 'Wikidata' ORDER BY value LIMIT 1) AS wikidata,
+        (SELECT value FROM external_ids WHERE owner_id = artist.id AND provider = 'Musicbrainz' ORDER BY value LIMIT 1) AS musicbrainz,
+        EXISTS(SELECT 1 FROM artwork WHERE owner_id = artist.id AND kind = 'Portrait') AS has_portrait
         FROM artists AS artist WHERE artist.id = ?"
     ).bind(id).fetch_optional(&store.0).await?;
     let Some(candidate) = candidate else {
@@ -168,7 +168,7 @@ pub async fn enrich(
         AND ((biography IS NULL AND ? IS NOT NULL) OR (begin_date IS NULL AND ? IS NOT NULL) OR (end_date IS NULL AND ? IS NOT NULL))")
         .bind(description).bind(&begin).bind(&end).bind(id).bind(description).bind(&begin).bind(&end)
         .execute(&mut *db).await?;
-    query("INSERT INTO artist_external_ids (owner_id, provider, value) VALUES (?, 'Wikidata', ?) ON CONFLICT DO NOTHING")
+    query("INSERT INTO external_ids (owner_id, provider, value) VALUES (?, 'Wikidata', ?) ON CONFLICT DO NOTHING")
         .bind(id).bind(qid).execute(&mut *db).await?;
     for isni in entity
         .values("P213")
@@ -182,7 +182,7 @@ pub async fn enrich(
                 .enumerate()
                 .all(|(i, byte)| byte.is_ascii_digit() || (i == 15 && byte == b'X'))
         {
-            query("INSERT INTO artist_external_ids (owner_id, provider, value) VALUES (?, 'Isni', ?) ON CONFLICT DO NOTHING")
+            query("INSERT INTO external_ids (owner_id, provider, value) VALUES (?, 'Isni', ?) ON CONFLICT DO NOTHING")
                 .bind(id).bind(isni).execute(&mut *db).await?;
         }
     }

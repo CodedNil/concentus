@@ -5,7 +5,7 @@ use super::{
 use crate::editor;
 use crate::{catalog::Kind, store::Store};
 use concentus_types::{Id, Isrc, PartialDate};
-use sqlx::{AssertSqlSafe, SqliteConnection, query, query_scalar};
+use sqlx::{SqliteConnection, query, query_scalar};
 use topcoat::Result;
 use uuid::Uuid;
 
@@ -64,37 +64,32 @@ fn date_text(value: Option<&str>) -> Option<String> {
 
 async fn identity(db: &mut SqliteConnection, kind: Kind, mbid: &str) -> Result<String> {
     let normalized: Id<()> = mbid.parse()?;
-    let sql = format!(
-        "SELECT owner_id FROM {} WHERE provider = 'Musicbrainz' AND value = ? ORDER BY owner_id LIMIT 1",
-        kind.external_id_table()
-            .expect("MusicBrainz entities have external IDs")
-    );
-    Ok(query_scalar(AssertSqlSafe(sql))
-        .bind(normalized.to_string())
-        .fetch_optional(db)
-        .await?
-        .unwrap_or_else(|| Uuid::now_v7().to_string()))
+    let old: Option<String> = query_scalar(
+        "SELECT external.owner_id FROM external_ids AS external
+         JOIN records ON records.id = external.owner_id
+         WHERE external.provider = 'Musicbrainz' AND external.value = ? AND records.collection = ?
+         ORDER BY external.owner_id LIMIT 1",
+    )
+    .bind(normalized.to_string())
+    .bind(kind.path())
+    .fetch_optional(&mut *db)
+    .await?;
+    if let Some(id) = old {
+        return Ok(id);
+    }
+    let id = Uuid::now_v7().to_string();
+    query("INSERT INTO records (id, collection) VALUES (?, ?)")
+        .bind(&id)
+        .bind(kind.path())
+        .execute(db)
+        .await?;
+    Ok(id)
 }
 
-async fn external(
-    db: &mut SqliteConnection,
-    kind: Kind,
-    id: &str,
-    provider: &str,
-    value: &str,
-) -> Result<()> {
+async fn external(db: &mut SqliteConnection, id: &str, provider: &str, value: &str) -> Result<()> {
     if !value.trim().is_empty() {
-        let sql = format!(
-            "INSERT INTO {} (owner_id, provider, value) VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
-            kind.external_id_table()
-                .expect("MusicBrainz entities have external IDs")
-        );
-        query(AssertSqlSafe(sql))
-            .bind(id)
-            .bind(provider)
-            .bind(value)
-            .execute(db)
-            .await?;
+        query("INSERT INTO external_ids (owner_id, provider, value) VALUES (?, ?, ?) ON CONFLICT DO NOTHING")
+            .bind(id).bind(provider).bind(value).execute(db).await?;
     }
     Ok(())
 }
@@ -139,14 +134,14 @@ async fn artist(db: &mut SqliteConnection, artist: &Artist) -> Result<String> {
     .bind(origin)
     .execute(&mut *db)
     .await?;
-    external(db, Kind::Artist, &id, "Musicbrainz", &artist.id).await?;
+    external(db, &id, "Musicbrainz", &artist.id).await?;
     for value in &artist.isnis {
-        external(db, Kind::Artist, &id, "Isni", value).await?;
+        external(db, &id, "Isni", value).await?;
     }
     for value in &artist.ipis {
-        external(db, Kind::Artist, &id, "Ipi", value).await?;
+        external(db, &id, "Ipi", value).await?;
     }
-    tags(db, Kind::Artist, &id, &artist.tags).await?;
+    tags(db, &id, &artist.tags).await?;
     editor::finish_import(db, Kind::Artist, &id, &before).await?;
     Ok(id)
 }
@@ -187,41 +182,40 @@ async fn release(
     .bind(label)
     .execute(&mut *db)
     .await?;
-    external(db, Kind::Album, &id, "Musicbrainz", &release.id).await?;
+    external(db, &id, "Musicbrainz", &release.id).await?;
     if let Some(group) = release.group.as_ref().and_then(|group| group.id.as_deref()) {
-        external(
-            db,
-            Kind::Album,
-            &id,
-            &format!("other:{RELEASE_GROUP_PROVIDER}"),
-            group,
-        )
-        .await?;
+        external(db, &id, &format!("other:{RELEASE_GROUP_PROVIDER}"), group).await?;
     }
     if let Some(barcode) = &release.barcode {
-        external(db, Kind::Album, &id, "Barcode", barcode).await?;
+        external(db, &id, "Barcode", barcode).await?;
     }
     for number in release
         .labels
         .iter()
         .filter_map(|info| info.catalog_number.as_deref())
     {
-        external(db, Kind::Album, &id, "other:Catalog number", number).await?;
+        external(db, &id, "other:Catalog number", number).await?;
     }
-    credits(db, Kind::Album, &id, &release.credits).await?;
-    tags(db, Kind::Album, &id, &release.tags).await?;
+    credits(db, &id, &release.credits).await?;
+    tags(db, &id, &release.tags).await?;
     if release.cover_art.as_ref().is_some_and(|art| art.front)
         && let Some(url) = front(&release.id, false)
     {
-        let artwork: i64 = query_scalar("INSERT INTO album_artwork (owner_id, position, kind, explicit)
-            SELECT ?, coalesce(max(position) + 1, 0), 'Cover', 0 FROM album_artwork WHERE owner_id = ?
-            HAVING NOT EXISTS (SELECT 1 FROM album_artwork WHERE owner_id = ? AND kind = 'Cover')
-            RETURNING id")
-            .bind(&id).bind(&id).bind(&id)
-            .fetch_optional(&mut *db).await?.unwrap_or_default();
+        let artwork: i64 = query_scalar(
+            "INSERT INTO artwork (owner_id, position, kind, explicit)
+            SELECT ?, coalesce(max(position) + 1, 0), 'Cover', 0 FROM artwork WHERE owner_id = ?
+            HAVING NOT EXISTS (SELECT 1 FROM artwork WHERE owner_id = ? AND kind = 'Cover')
+            RETURNING id",
+        )
+        .bind(&id)
+        .bind(&id)
+        .bind(&id)
+        .fetch_optional(&mut *db)
+        .await?
+        .unwrap_or_default();
         if artwork != 0 {
             query(
-                "INSERT INTO album_artwork_renditions (owner_id, position, url, width, height)
+                "INSERT INTO artwork_renditions (owner_id, position, url, width, height)
                 VALUES (?, 0, ?, 500, 500)",
             )
             .bind(artwork)
@@ -249,14 +243,7 @@ async fn release(
                     Some(&track.credits),
                 )
                 .await?;
-                external(
-                    db,
-                    Kind::Track,
-                    &track_id,
-                    "other:MusicBrainz release track",
-                    &track.id,
-                )
-                .await?;
+                external(db, &track_id, "other:MusicBrainz release track", &track.id).await?;
                 query(
                     "INSERT INTO disc_tracks (owner_id, position, track_id) VALUES (?, ?, ?)
                     ON CONFLICT DO NOTHING",
@@ -289,10 +276,10 @@ async fn recording(
             release_date = coalesce(tracks.release_date, excluded.release_date)")
         .bind(&id).bind(&recording.title).bind(recording.length.or(length).unwrap_or_default())
         .bind(album).bind(date_text(recording.date.as_deref())).execute(&mut *db).await?;
-    external(db, Kind::Track, &id, "Musicbrainz", &recording.id).await?;
+    external(db, &id, "Musicbrainz", &recording.id).await?;
     for raw in &recording.isrcs {
         if let Ok(value) = raw.parse::<Isrc>() {
-            external(db, Kind::Track, &id, "Isrc", value.as_str()).await?;
+            external(db, &id, "Isrc", value.as_str()).await?;
         }
     }
     let billed = if recording.credits.is_empty() {
@@ -300,28 +287,16 @@ async fn recording(
     } else {
         &recording.credits
     };
-    credits(db, Kind::Track, &id, billed).await?;
-    tags(db, Kind::Track, &id, &recording.tags).await?;
+    credits(db, &id, billed).await?;
+    tags(db, &id, &recording.tags).await?;
     editor::finish_import(db, Kind::Track, &id, &before).await?;
     Ok(id)
 }
 
-async fn credits(
-    db: &mut SqliteConnection,
-    kind: Kind,
-    id: &str,
-    credits: &[Credit],
-) -> Result<()> {
-    let Some(table) = kind.credit_table() else {
-        return Ok(());
-    };
-    let sql = format!(
-        "INSERT INTO {table} (owner_id, position, artist_id, role) VALUES (?, ?, ?, 'Primary')
-        ON CONFLICT DO NOTHING"
-    );
+async fn credits(db: &mut SqliteConnection, id: &str, credits: &[Credit]) -> Result<()> {
     for (position, credit) in credits.iter().enumerate() {
         let artist = artist(db, &credit.artist).await?;
-        query(AssertSqlSafe(sql.as_str()))
+        query("INSERT INTO credits (owner_id, position, artist_id, role) VALUES (?, ?, ?, 'Primary') ON CONFLICT DO NOTHING")
             .bind(id)
             .bind(i64::try_from(position)?)
             .bind(artist)
@@ -331,10 +306,7 @@ async fn credits(
     Ok(())
 }
 
-async fn tags(db: &mut SqliteConnection, kind: Kind, id: &str, tags: &[SourceTag]) -> Result<()> {
-    let Some(table) = kind.tag_table() else {
-        return Ok(());
-    };
+async fn tags(db: &mut SqliteConnection, id: &str, tags: &[SourceTag]) -> Result<()> {
     for tag in tags.iter().filter(|tag| !tag.name.trim().is_empty()) {
         // MusicBrainz provides vote counts rather than a calibrated weight.
         let weight = tag.count.unwrap_or(1).clamp(0, 100);
@@ -354,20 +326,15 @@ async fn tags(db: &mut SqliteConnection, kind: Kind, id: &str, tags: &[SourceTag
                 .await?;
             id
         };
-        let sql = format!(
-            "INSERT INTO {table} (owner_id, position, tag_id, weight)
-            SELECT ?, coalesce(max(position) + 1, 0), ?, ? FROM {table} WHERE owner_id = ?
-            HAVING NOT EXISTS (SELECT 1 FROM {table} WHERE owner_id = ? AND tag_id = ?)"
-        );
-        query(AssertSqlSafe(sql))
-            .bind(id)
-            .bind(&tag_id)
-            .bind(weight)
-            .bind(id)
-            .bind(id)
-            .bind(&tag_id)
-            .execute(&mut *db)
-            .await?;
+        query(
+            "INSERT INTO record_tags (owner_id, tag_id, weight)
+             VALUES (?, ?, ?) ON CONFLICT (owner_id, tag_id) DO NOTHING",
+        )
+        .bind(id)
+        .bind(&tag_id)
+        .bind(weight)
+        .execute(&mut *db)
+        .await?;
     }
     Ok(())
 }

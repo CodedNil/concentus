@@ -56,30 +56,8 @@ impl Kind {
         }
     }
 
-    pub const fn credit_table(self) -> Option<&'static str> {
-        match self {
-            Self::Album => Some("album_credits"),
-            Self::Track => Some("track_credits"),
-            _ => None,
-        }
-    }
-
-    pub const fn tag_table(self) -> Option<&'static str> {
-        match self {
-            Self::Artist => Some("artist_tags"),
-            Self::Album => Some("album_tags"),
-            Self::Track => Some("track_tags"),
-            Self::Tag => None,
-        }
-    }
-
-    pub const fn external_id_table(self) -> Option<&'static str> {
-        match self {
-            Self::Artist => Some("artist_external_ids"),
-            Self::Album => Some("album_external_ids"),
-            Self::Track => Some("track_external_ids"),
-            Self::Tag => None,
-        }
+    const fn has_credits(self) -> bool {
+        matches!(self, Self::Album | Self::Track)
     }
 
     pub fn href(self, id: impl std::fmt::Display) -> String {
@@ -117,22 +95,28 @@ impl Store {
         let title = kind.title_column();
         let columns = entry_columns(kind);
         let related = match parent {
-            Some((Kind::Artist, _)) if kind == Kind::Artist => "EXISTS (SELECT 1 FROM artist_members WHERE owner_id = item.id AND artist_id = ?4)".into(),
-            Some((Kind::Artist, _)) => kind.credit_table().map_or_else(|| "0".into(), |table| format!("EXISTS (SELECT 1 FROM {table} AS credit WHERE credit.owner_id = item.id AND credit.artist_id = ?4)")),
-            Some((Kind::Track, _)) if kind == Kind::Album => "EXISTS (SELECT 1 FROM album_discs AS disc JOIN disc_tracks AS track ON track.owner_id = disc.id WHERE disc.owner_id = item.id AND track.track_id = ?4)".into(),
-            Some((Kind::Tag, _)) if kind == Kind::Tag => "item.parent = ?4".into(),
-            Some((Kind::Tag, _)) => kind.tag_table().map_or_else(|| "0".into(), |table| format!("EXISTS (SELECT 1 FROM {table} AS tag WHERE tag.owner_id = item.id AND tag.tag_id = ?4)")),
-            Some(_) => "0".into(),
-            None => "1".into(),
+            Some((Kind::Artist, _)) if kind == Kind::Artist => {
+                "EXISTS (SELECT 1 FROM artist_members WHERE owner_id = item.id AND artist_id = ?4)"
+            }
+            Some((Kind::Artist, _)) if kind.has_credits() => {
+                "EXISTS (SELECT 1 FROM credits WHERE owner_id = item.id AND artist_id = ?4)"
+            }
+            Some((Kind::Track, _)) if kind == Kind::Album => {
+                "EXISTS (SELECT 1 FROM album_discs AS disc JOIN disc_tracks AS track ON track.owner_id = disc.id WHERE disc.owner_id = item.id AND track.track_id = ?4)"
+            }
+            Some((Kind::Tag, _)) if kind == Kind::Tag => "item.parent = ?4",
+            Some((Kind::Tag, _)) => {
+                "EXISTS (SELECT 1 FROM record_tags WHERE owner_id = item.id AND tag_id = ?4)"
+            }
+            Some(_) => "0",
+            None => "1",
         };
         let parent_id = parent.map(|(_, id)| id);
         let (artist, query) = input
             .split_once(" — ")
             .or_else(|| input.split_once(" - "))
             .filter(|(artist, title)| {
-                kind.credit_table().is_some()
-                    && !artist.trim().is_empty()
-                    && !title.trim().is_empty()
+                kind.has_credits() && !artist.trim().is_empty() && !title.trim().is_empty()
             })
             .map_or(("", input), |(artist, title)| (artist.trim(), title.trim()));
         let additional = match kind {
@@ -147,9 +131,11 @@ impl Store {
                 OR instr(lower(title || ' ' || coalesce(subtitle, '')), lower(?1)) > 0))"
             }
         };
-        let external = kind.external_id_table().map_or_else(String::new, |table| {
-            format!("OR EXISTS (SELECT 1 FROM {table} WHERE owner_id = item.id AND value = ?1 COLLATE NOCASE)")
-        });
+        let external = if kind == Kind::Tag {
+            ""
+        } else {
+            "OR EXISTS (SELECT 1 FROM external_ids WHERE owner_id = item.id AND value = ?1 COLLATE NOCASE)"
+        };
         let sql = format!(
             "SELECT {columns} FROM {} AS item
             WHERE (?1 = '' OR item.id = ?1 OR instr(lower(item.{title}), lower(?1)) > 0 {additional} {external})
@@ -215,25 +201,25 @@ fn entry_columns(kind: Kind) -> String {
         _ => "NULL",
     };
     let image = match kind {
-        Kind::Artist => image_sql("artist", "item.id", "Portrait"),
-        Kind::Album => image_sql("album", album, "Cover"),
+        Kind::Artist => image_sql("item.id", "Portrait"),
+        Kind::Album => image_sql(album, "Cover"),
         Kind::Track => format!(
             "coalesce({}, {})",
-            image_sql("track", "item.id", "Cover"),
-            image_sql("album", album, "Cover")
+            image_sql("item.id", "Cover"),
+            image_sql(album, "Cover")
         ),
         Kind::Tag => "NULL".into(),
     };
     let group = crate::enrichment::cover_art_archive::RELEASE_GROUP_PROVIDER;
     format!("item.id, item.{title} AS title, {subtitle} AS subtitle, {preview} AS preview, {image} AS image,
-        (SELECT value FROM album_external_ids WHERE owner_id = {album} AND provider = 'Musicbrainz' ORDER BY value LIMIT 1) AS release_id,
-        (SELECT value FROM album_external_ids WHERE owner_id = {album} AND provider = 'other:{group}' ORDER BY value LIMIT 1) AS release_group_id")
+        (SELECT value FROM external_ids WHERE owner_id = {album} AND provider = 'Musicbrainz' ORDER BY value LIMIT 1) AS release_id,
+        (SELECT value FROM external_ids WHERE owner_id = {album} AND provider = 'other:{group}' ORDER BY value LIMIT 1) AS release_group_id")
 }
 
-fn image_sql(table: &str, owner: &str, kind: &str) -> String {
+fn image_sql(owner: &str, kind: &str) -> String {
     format!(
-        "(SELECT rendition.url FROM {table}_artwork AS art
-        JOIN {table}_artwork_renditions AS rendition ON rendition.owner_id = art.id
+        "(SELECT rendition.url FROM artwork AS art
+        JOIN artwork_renditions AS rendition ON rendition.owner_id = art.id
         WHERE art.owner_id = {owner} AND art.kind = '{kind}' AND rendition.duration_ms IS NULL
         ORDER BY art.explicit, art.position, rendition.position LIMIT 1)"
     )
@@ -260,22 +246,19 @@ async fn view_record<T: DatabaseRecord>(
     }
 }
 
-fn subtitle_sql(kind: Kind) -> String {
-    if let Some(table) = kind.credit_table() {
-        return format!(
-            "(SELECT group_concat(name, ', ') FROM (
-            SELECT artist.name FROM {table} AS credit
+fn subtitle_sql(kind: Kind) -> &'static str {
+    if kind.has_credits() {
+        return "(SELECT group_concat(name, ', ') FROM (
+            SELECT artist.name FROM credits AS credit
             JOIN artists AS artist ON artist.id = credit.artist_id
             WHERE credit.owner_id = item.id AND credit.role IN ('Primary', 'Featured')
-            ORDER BY credit.position))"
-        );
+            ORDER BY credit.position))";
     }
     match kind {
         Kind::Artist => "coalesce(item.origin, item.kind)",
         Kind::Tag => "item.kind",
         _ => unreachable!(),
     }
-    .into()
 }
 
 const fn preview_sql(kind: Kind) -> &'static str {

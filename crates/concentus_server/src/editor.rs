@@ -29,29 +29,17 @@ const fn children(name: &'static str, scope: &'static str) -> Table {
     }
 }
 
-macro_rules! artwork {
-    ($prefix:literal) => {
-        &[
-            table(concat!($prefix, "_artwork"), "owner_id = ?1"),
-            children(
-                concat!($prefix, "_artwork_renditions"),
-                concat!(
-                    "owner_id IN (SELECT id FROM ",
-                    $prefix,
-                    "_artwork WHERE owner_id = ?1)"
-                ),
-            ),
-            children(
-                concat!($prefix, "_artwork_colors"),
-                concat!(
-                    "owner_id IN (SELECT id FROM ",
-                    $prefix,
-                    "_artwork WHERE owner_id = ?1)"
-                ),
-            ),
-        ]
-    };
-}
+const ARTWORK: &[Table] = &[
+    table("artwork", "owner_id = ?1"),
+    children(
+        "artwork_renditions",
+        "owner_id IN (SELECT id FROM artwork WHERE owner_id = ?1)",
+    ),
+    children(
+        "artwork_colors",
+        "owner_id IN (SELECT id FROM artwork WHERE owner_id = ?1)",
+    ),
+];
 
 macro_rules! direct {
     ($name:literal) => {
@@ -64,7 +52,7 @@ const fn groups(kind: Kind) -> &'static [(&'static str, &'static [Table])] {
         Kind::Artist => {
             const {
                 &[
-                    ("artwork", artwork!("artist")),
+                    ("artwork", ARTWORK),
                     (
                         "members",
                         &[
@@ -75,16 +63,16 @@ const fn groups(kind: Kind) -> &'static [(&'static str, &'static [Table])] {
                             ),
                         ],
                     ),
-                    ("tags", direct!("artist_tags")),
-                    ("external_ids", direct!("artist_external_ids")),
+                    ("tags", direct!("record_tags")),
+                    ("external_ids", direct!("external_ids")),
                 ]
             }
         }
         Kind::Album => {
             const {
                 &[
-                    ("artwork", artwork!("album")),
-                    ("credits", direct!("album_credits")),
+                    ("artwork", ARTWORK),
+                    ("credits", direct!("credits")),
                     (
                         "discs",
                         &[
@@ -95,20 +83,20 @@ const fn groups(kind: Kind) -> &'static [(&'static str, &'static [Table])] {
                             ),
                         ],
                     ),
-                    ("tags", direct!("album_tags")),
-                    ("external_ids", direct!("album_external_ids")),
+                    ("tags", direct!("record_tags")),
+                    ("external_ids", direct!("external_ids")),
                 ]
             }
         }
         Kind::Track => {
             const {
                 &[
-                    ("artwork", artwork!("track")),
-                    ("credits", direct!("track_credits")),
+                    ("artwork", ARTWORK),
+                    ("credits", direct!("credits")),
                     ("languages", direct!("track_languages")),
                     ("derived_from", direct!("track_derivations")),
-                    ("tags", direct!("track_tags")),
-                    ("external_ids", direct!("track_external_ids")),
+                    ("tags", direct!("record_tags")),
+                    ("external_ids", direct!("external_ids")),
                     (
                         "lyrics",
                         &[
@@ -211,11 +199,17 @@ pub async fn audit(
         if previous == &value {
             continue;
         }
-        query("INSERT INTO record_history (collection, record_id, field, minute, old_value, new_value)
-            VALUES (?, ?, ?, unixepoch() / 60, ?, ?)
-            ON CONFLICT(collection, record_id, field, minute) DO UPDATE SET new_value = excluded.new_value")
-            .bind(kind.path()).bind(id).bind(field).bind(previous.to_string()).bind(value.to_string())
-            .execute(&mut *db).await?;
+        query(
+            "INSERT INTO record_history (record_id, field, minute, old_value, new_value)
+            VALUES (?, ?, unixepoch() / 60, ?, ?)
+            ON CONFLICT(record_id, field, minute) DO UPDATE SET new_value = excluded.new_value",
+        )
+        .bind(id)
+        .bind(field)
+        .bind(previous.to_string())
+        .bind(value.to_string())
+        .execute(&mut *db)
+        .await?;
     }
     Ok(())
 }
@@ -231,23 +225,17 @@ pub async fn seed(db: &mut SqliteConnection, kind: Kind, id: &str) -> Result<()>
             || (field == "duration_ms" && value.as_u64() == Some(0))
             || (field == "kind" && value.as_str() == Some("Unknown"))
         {
-            queue(db, kind, id, &field, false).await?;
+            queue(db, id, &field, false).await?;
         }
     }
     Ok(())
 }
 
-pub async fn queue(
-    db: &mut SqliteConnection,
-    kind: Kind,
-    id: &str,
-    field: &str,
-    refresh: bool,
-) -> Result<()> {
-    query("INSERT INTO enrichment_needed (collection, record_id, field, due_at, refresh, generation) VALUES (?, ?, ?, unixepoch(), ?, random())
-        ON CONFLICT(collection, record_id, field) DO UPDATE SET due_at = excluded.due_at,
+pub async fn queue(db: &mut SqliteConnection, id: &str, field: &str, refresh: bool) -> Result<()> {
+    query("INSERT INTO enrichment_needed (record_id, field, due_at, refresh, generation) VALUES (?, ?, unixepoch(), ?, random())
+        ON CONFLICT(record_id, field) DO UPDATE SET due_at = excluded.due_at,
             generation = excluded.generation, refresh = excluded.refresh WHERE excluded.refresh")
-        .bind(kind.path()).bind(id).bind(field).bind(refresh).execute(db).await?;
+        .bind(id).bind(field).bind(refresh).execute(db).await?;
     Ok(())
 }
 
@@ -322,7 +310,7 @@ impl Store {
                 .await?;
         }
         audit(&mut db, Kind::Track, track, &before).await?;
-        clear_job(&mut db, Kind::Track, track, "lyrics").await?;
+        clear_job(&mut db, track, "lyrics").await?;
         db.commit().await?;
         Ok(())
     }
@@ -334,16 +322,17 @@ impl Store {
     ) -> Result<(Snapshot, Vec<Revision>, Vec<String>)> {
         let mut db = self.0.begin().await?;
         let fields = snapshot(&mut db, kind, id).await?;
-        let revisions = sqlx::query_as("SELECT field, minute, old_value, new_value FROM record_history
-            WHERE collection = ? AND record_id = ? AND old_value != new_value ORDER BY minute DESC, field")
-            .bind(kind.path()).bind(id).fetch_all(&mut *db).await?;
-        let pending = query_scalar(
-            "SELECT field FROM enrichment_needed WHERE collection = ? AND record_id = ?",
+        let revisions = sqlx::query_as(
+            "SELECT field, minute, old_value, new_value FROM record_history
+            WHERE record_id = ? AND old_value != new_value ORDER BY minute DESC, field",
         )
-        .bind(kind.path())
         .bind(id)
         .fetch_all(&mut *db)
         .await?;
+        let pending = query_scalar("SELECT field FROM enrichment_needed WHERE record_id = ?")
+            .bind(id)
+            .fetch_all(&mut *db)
+            .await?;
         db.commit().await?;
         Ok((fields, revisions, pending))
     }
@@ -367,7 +356,7 @@ impl Store {
                     .keys()
                     .filter(|key| field.is_empty() || key.as_str() == field)
                 {
-                    queue(&mut db, kind, id, key, true).await?;
+                    queue(&mut db, id, key, true).await?;
                 }
             }
             "save" => {
@@ -377,14 +366,14 @@ impl Store {
                 set_field(&mut db, kind, id, field, &serde_json::from_str(input)?).await?;
                 verify(&mut db, kind, id).await?;
                 audit(&mut db, kind, id, &before).await?;
-                clear_job(&mut db, kind, id, field).await?;
+                clear_job(&mut db, id, field).await?;
             }
             "save_all" => {
                 let fields: Snapshot = serde_json::from_str(input)?;
                 for (key, value) in &fields {
                     if before.get(key) != Some(value) {
                         set_field(&mut db, kind, id, key, value).await?;
-                        clear_job(&mut db, kind, id, key).await?;
+                        clear_job(&mut db, id, key).await?;
                     }
                 }
                 verify(&mut db, kind, id).await?;
@@ -394,10 +383,9 @@ impl Store {
                 let minute: i64 = input.parse()?;
                 let changes: Vec<Revision> = sqlx::query_as(
                     "SELECT field, minute, old_value, new_value FROM record_history
-                    WHERE collection = ? AND record_id = ? AND minute > ? AND (? = '' OR field = ?)
+                    WHERE record_id = ? AND minute > ? AND (? = '' OR field = ?)
                     ORDER BY minute DESC, field",
                 )
-                .bind(kind.path())
                 .bind(id)
                 .bind(minute)
                 .bind(field)
@@ -410,7 +398,7 @@ impl Store {
                     .collect::<BTreeMap<_, _>>();
                 for (key, value) in changes {
                     set_field(&mut db, kind, id, &key, &serde_json::from_str(&value)?).await?;
-                    clear_job(&mut db, kind, id, &key).await?;
+                    clear_job(&mut db, id, &key).await?;
                 }
                 verify(&mut db, kind, id).await?;
                 audit(&mut db, kind, id, &before).await?;
@@ -565,9 +553,8 @@ pub async fn finish_import(
         audit(db, kind, id, before).await
     }
 }
-async fn clear_job(db: &mut SqliteConnection, kind: Kind, id: &str, field: &str) -> Result<()> {
-    query("DELETE FROM enrichment_needed WHERE collection = ? AND record_id = ? AND field = ?")
-        .bind(kind.path())
+async fn clear_job(db: &mut SqliteConnection, id: &str, field: &str) -> Result<()> {
+    query("DELETE FROM enrichment_needed WHERE record_id = ? AND field = ?")
         .bind(id)
         .bind(field)
         .execute(db)

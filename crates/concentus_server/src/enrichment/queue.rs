@@ -1,7 +1,7 @@
 use super::{Enrichment, import, lrclib, musicbrainz::Batch, wikidata, wikimedia_commons};
 use crate::{catalog::Kind, editor, store::Store};
 use serde_json::{Value, json};
-use sqlx::{AssertSqlSafe, query, query_as, query_scalar};
+use sqlx::{query, query_as, query_scalar};
 use std::{collections::BTreeMap, time::Duration};
 use tokio::time::{MissedTickBehavior, interval};
 use topcoat::Result;
@@ -33,7 +33,8 @@ impl Enrichment {
 
     async fn work(&self, store: &Store) -> Result<()> {
         let jobs: Vec<Job> = query_as(
-            "SELECT collection, record_id, field, generation, refresh FROM enrichment_needed
+            "SELECT records.collection, queue.record_id, queue.field, queue.generation, queue.refresh
+            FROM enrichment_needed AS queue JOIN records ON records.id = queue.record_id
             WHERE due_at <= unixepoch() ORDER BY refresh DESC, due_at, collection, record_id, field LIMIT 80",
         )
         .fetch_all(&store.0)
@@ -99,13 +100,7 @@ impl Enrichment {
     }
 
     async fn base(&self, store: &Store, kind: Kind, id: &str, jobs: &[&Job]) -> Result<()> {
-        let Some(table) = kind.external_id_table() else {
-            return Ok(());
-        };
-        let statement = format!(
-            "SELECT value FROM {table} WHERE owner_id = ? AND provider = 'Musicbrainz' ORDER BY value LIMIT 1"
-        );
-        let mbid: Option<String> = query_scalar(AssertSqlSafe(statement))
+        let mbid: Option<String> = query_scalar("SELECT value FROM external_ids WHERE owner_id = ? AND provider = 'Musicbrainz' ORDER BY value LIMIT 1")
             .bind(id)
             .fetch_optional(&store.0)
             .await?;
@@ -118,9 +113,8 @@ impl Enrichment {
         for job in jobs {
             let active: bool = query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM enrichment_needed WHERE
-                collection = ? AND record_id = ? AND field = ? AND generation = ?)",
+                record_id = ? AND field = ? AND generation = ?)",
             )
-            .bind(kind.path())
             .bind(id)
             .bind(&job.field)
             .bind(job.generation)
@@ -155,15 +149,14 @@ async fn finish(store: &Store, jobs: Vec<&Job>, result: Result<()>) -> Result<()
             != Some(reqwest::StatusCode::NOT_FOUND)
     });
     let sql = error.map_or(
-        "DELETE FROM enrichment_needed WHERE collection = ? AND record_id = ? AND field = ? AND generation = ?",
+        "DELETE FROM enrichment_needed WHERE record_id = ? AND field = ? AND generation = ?",
         |error| {
             eprintln!("Enrichment attempt deferred: {error}");
-            "UPDATE enrichment_needed SET due_at = unixepoch() + 60 WHERE collection = ? AND record_id = ? AND field = ? AND generation = ?"
+            "UPDATE enrichment_needed SET due_at = unixepoch() + 60 WHERE record_id = ? AND field = ? AND generation = ?"
         },
     );
     for job in jobs {
         query(sql)
-            .bind(&job.collection)
             .bind(&job.record_id)
             .bind(&job.field)
             .bind(job.generation)

@@ -90,14 +90,18 @@ pub async fn enrich(source: &Source, store: &Store, artist: &str, file: &str) ->
     let mut db = store.0.begin_with("BEGIN IMMEDIATE").await?;
     let before = crate::editor::snapshot(&mut db, crate::catalog::Kind::Artist, artist).await?;
     let artwork: Option<i64> = query_scalar(
-        "INSERT INTO artist_artwork (owner_id, position, kind, explicit)
-        SELECT ?, coalesce(max(position) + 1, 0), 'Portrait', 0 FROM artist_artwork WHERE owner_id = ?
-        HAVING NOT EXISTS (SELECT 1 FROM artist_artwork WHERE owner_id = ? AND kind = 'Portrait')
-        RETURNING id"
-    ).bind(artist).bind(artist).bind(artist)
-        .fetch_optional(&mut *db).await?;
+        "INSERT INTO artwork (owner_id, position, kind, explicit)
+        SELECT ?, coalesce(max(position) + 1, 0), 'Portrait', 0 FROM artwork WHERE owner_id = ?
+        HAVING NOT EXISTS (SELECT 1 FROM artwork WHERE owner_id = ? AND kind = 'Portrait')
+        RETURNING id",
+    )
+    .bind(artist)
+    .bind(artist)
+    .bind(artist)
+    .fetch_optional(&mut *db)
+    .await?;
     if let Some(artwork) = artwork {
-        query("INSERT INTO artist_artwork_renditions (owner_id, position, url, width, height) VALUES (?, 0, ?, ?, ?)")
+        query("INSERT INTO artwork_renditions (owner_id, position, url, width, height) VALUES (?, 0, ?, ?, ?)")
             .bind(artwork).bind(url).bind(width).bind(height).execute(&mut *db).await?;
     }
     crate::editor::audit(&mut db, crate::catalog::Kind::Artist, artist, &before).await?;

@@ -34,12 +34,12 @@ pub async fn enrich(
 ) -> Result<bool> {
     let candidate: Option<Candidate> = query_as(
         "SELECT track.title, track.duration_ms, album.title AS album, (
-            SELECT artist.name FROM track_credits AS credit JOIN artists AS artist ON artist.id = credit.artist_id
+            SELECT artist.name FROM credits AS credit JOIN artists AS artist ON artist.id = credit.artist_id
             WHERE credit.owner_id = track.id AND credit.role = 'Primary' ORDER BY credit.position LIMIT 1
         ) AS artist FROM tracks AS track LEFT JOIN albums AS album ON album.id = track.album_id
         WHERE track.id = ? AND track.duration_ms BETWEEN 1000 AND 3600000
         AND (? OR NOT EXISTS (SELECT 1 FROM track_lyrics WHERE track_id = track.id))
-        AND EXISTS (SELECT 1 FROM track_credits WHERE owner_id = track.id AND role = 'Primary')",
+        AND EXISTS (SELECT 1 FROM credits WHERE owner_id = track.id AND role = 'Primary')",
     ).bind(id).bind(refresh).fetch_optional(&store.0).await?;
     let Some(candidate) = candidate else {
         return Ok(false);
@@ -77,7 +77,7 @@ pub async fn enrich(
     let mut db = store.0.begin_with("BEGIN IMMEDIATE").await?;
     let active: bool = query_scalar(
         "SELECT EXISTS(SELECT 1 FROM enrichment_needed
-        WHERE collection = 'tracks' AND record_id = ? AND field = 'lyrics' AND generation = ?)",
+        WHERE record_id = ? AND field = 'lyrics' AND generation = ?)",
     )
     .bind(id)
     .bind(generation)
@@ -120,7 +120,7 @@ pub async fn enrich(
                 .execute(&mut *db).await?;
         }
     }
-    query("INSERT INTO track_external_ids (owner_id, provider, value) VALUES (?, 'other:LRCLIB', ?) ON CONFLICT DO NOTHING")
+    query("INSERT INTO external_ids (owner_id, provider, value) VALUES (?, 'other:LRCLIB', ?) ON CONFLICT DO NOTHING")
         .bind(id).bind(response.id.to_string()).execute(&mut *db).await?;
     crate::editor::audit(&mut db, crate::catalog::Kind::Track, id, &before).await?;
     db.commit().await?;

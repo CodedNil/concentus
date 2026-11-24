@@ -72,10 +72,10 @@ impl SqlLookup {
         if let Some(name) = request.artist_name {
             if T::NAME == "artists" {
                 lookup.match_name("name", name);
-            } else if let Some(table) = T::CREDIT_TABLE {
+            } else if T::HAS_CREDITS {
                 let name = lookup.bind(name);
                 lookup.predicates.push(format!(
-                    "EXISTS (SELECT 1 FROM {table} AS credit
+                    "EXISTS (SELECT 1 FROM credits AS credit
                         JOIN artists AS artist ON artist.id = credit.artist_id
                         WHERE credit.owner_id = record.id
                         AND credit.role IN ('Primary', 'Featured')
@@ -86,12 +86,11 @@ impl SqlLookup {
             }
         }
         for id in request.external_ids {
-            if let Some(table) = T::EXTERNAL_ID_TABLE {
+            if T::HAS_EXTERNAL_IDS {
                 let provider = lookup.bind(provider_key(id.provider)?);
                 let value = lookup.bind(id.value);
                 lookup.predicates.push(format!(
-                    "EXISTS (SELECT 1 FROM {table} AS external WHERE external.owner_id = record.id
-                        AND external.provider = {provider} AND external.value = {value})"
+                    "record.id IN (SELECT owner_id FROM external_ids WHERE provider = {provider} AND value = {value})"
                 ));
             } else {
                 lookup.predicates.push("0".into());

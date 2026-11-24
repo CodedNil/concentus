@@ -12,8 +12,8 @@ use topcoat::{Error, Result};
 
 pub trait DatabaseRecord: Collection + Send {
     const COLUMNS: &'static str = "record.*";
-    const CREDIT_TABLE: Option<&'static str> = None;
-    const EXTERNAL_ID_TABLE: Option<&'static str> = None;
+    const HAS_CREDITS: bool = false;
+    const HAS_EXTERNAL_IDS: bool = false;
 
     fn read(db: &mut SqliteConnection, row: SqliteRow)
     -> impl Future<Output = Result<Self>> + Send;
@@ -56,7 +56,7 @@ pub async fn read_by_id<T: DatabaseRecord>(
 }
 
 impl DatabaseRecord for Artist {
-    const EXTERNAL_ID_TABLE: Option<&'static str> = Some("artist_external_ids");
+    const HAS_EXTERNAL_IDS: bool = true;
 
     async fn read(db: &mut SqliteConnection, row: SqliteRow) -> Result<Self> {
         let owner = Key::Text(row.try_get("id")?);
@@ -100,20 +100,11 @@ impl DatabaseRecord for Artist {
             begin: optional_parse(&row, "begin_date")?,
             end: optional_parse(&row, "end_date")?,
             origin: row.try_get("origin")?,
-            tags: ordered(db, "artist_tags", owner, weighted_tag).await?,
-            artwork: artwork(
-                db,
-                &row,
-                [
-                    "artist_artwork",
-                    "artist_artwork_renditions",
-                    "artist_artwork_colors",
-                ],
-            )
-            .await?,
+            tags: read_tags(db, row.try_get("id")?).await?,
+            artwork: artwork(db, owner).await?,
             theme: theme(&row)?,
             font,
-            external_ids: external_ids(db, "artist_external_ids", row.try_get("id")?).await?,
+            external_ids: external_ids(db, row.try_get("id")?).await?,
         })
     }
 
@@ -132,8 +123,8 @@ impl DatabaseRecord for Artist {
 }
 
 impl DatabaseRecord for Album {
-    const CREDIT_TABLE: Option<&'static str> = Some("album_credits");
-    const EXTERNAL_ID_TABLE: Option<&'static str> = Some("album_external_ids");
+    const HAS_CREDITS: bool = true;
+    const HAS_EXTERNAL_IDS: bool = true;
 
     async fn read(db: &mut SqliteConnection, row: SqliteRow) -> Result<Self> {
         let owner = Key::Text(row.try_get("id")?);
@@ -171,23 +162,14 @@ impl DatabaseRecord for Album {
             album_type,
             release_date: optional_parse(&row, "release_date")?,
             discs,
-            credits: ordered(db, "album_credits", owner, credit).await?,
+            credits: ordered(db, "credits", owner, credit).await?,
             label: row.try_get("label")?,
             copyright: row.try_get("copyright")?,
             description: row.try_get("description")?,
-            tags: ordered(db, "album_tags", owner, weighted_tag).await?,
-            artwork: artwork(
-                db,
-                &row,
-                [
-                    "album_artwork",
-                    "album_artwork_renditions",
-                    "album_artwork_colors",
-                ],
-            )
-            .await?,
+            tags: read_tags(db, row.try_get("id")?).await?,
+            artwork: artwork(db, owner).await?,
             theme: theme(&row)?,
-            external_ids: external_ids(db, "album_external_ids", row.try_get("id")?).await?,
+            external_ids: external_ids(db, row.try_get("id")?).await?,
         })
     }
 
@@ -223,8 +205,8 @@ impl DatabaseRecord for Album {
 impl DatabaseRecord for Track {
     const COLUMNS: &'static str = "record.*, COALESCE(record.release_date,
         (SELECT release_date FROM albums WHERE id = record.album_id)) AS effective_release_date";
-    const CREDIT_TABLE: Option<&'static str> = Some("track_credits");
-    const EXTERNAL_ID_TABLE: Option<&'static str> = Some("track_external_ids");
+    const HAS_CREDITS: bool = true;
+    const HAS_EXTERNAL_IDS: bool = true;
 
     async fn read(db: &mut SqliteConnection, row: SqliteRow) -> Result<Self> {
         let owner = Key::Text(row.try_get("id")?);
@@ -240,7 +222,7 @@ impl DatabaseRecord for Track {
             title: row.try_get("title")?,
             duration_ms: row.try_get("duration_ms")?,
             version: row.try_get("version")?,
-            credits: ordered(db, "track_credits", owner, credit).await?,
+            credits: ordered(db, "credits", owner, credit).await?,
             album: optional_parse(&row, "album_id")?.map_or(RecordRef::None, RecordRef::Id),
             release_date: optional_parse(&row, "effective_release_date")?,
             languages: ordered(db, "track_languages", owner, |row| {
@@ -249,7 +231,7 @@ impl DatabaseRecord for Track {
             .await?,
             lyrics: HashMap::new(),
             rating: optional_enum(&row, "rating")?,
-            tags: ordered(db, "track_tags", owner, weighted_tag).await?,
+            tags: read_tags(db, row.try_get("id")?).await?,
             features: AudioFeatures {
                 tempo_bpm: row.try_get("tempo_bpm")?,
                 key: optional_enum(&row, "key")?,
@@ -268,17 +250,8 @@ impl DatabaseRecord for Track {
             about: row.try_get("about")?,
             derived_from,
             music_video: row.try_get("music_video")?,
-            artwork: artwork(
-                db,
-                &row,
-                [
-                    "track_artwork",
-                    "track_artwork_renditions",
-                    "track_artwork_colors",
-                ],
-            )
-            .await?,
-            external_ids: external_ids(db, "track_external_ids", row.try_get("id")?).await?,
+            artwork: artwork(db, owner).await?,
+            external_ids: external_ids(db, row.try_get("id")?).await?,
         })
     }
 
@@ -376,6 +349,16 @@ fn role(row: &SqliteRow) -> Result<Role> {
     }
 }
 
+async fn read_tags(db: &mut SqliteConnection, owner: &str) -> Result<Vec<Scored<RecordRef<Tag>>>> {
+    query("SELECT tag_id, weight FROM record_tags WHERE owner_id = ? ORDER BY weight DESC, tag_id")
+        .bind(owner)
+        .fetch_all(db)
+        .await?
+        .iter()
+        .map(weighted_tag)
+        .collect()
+}
+
 fn weighted_tag(row: &SqliteRow) -> Result<Scored<RecordRef<Tag>>> {
     Ok(Scored {
         id: RecordRef::Id(parse(row, "tag_id")?),
@@ -428,16 +411,15 @@ fn derivation_kind(row: &SqliteRow) -> Result<DerivationKind> {
     Ok(kind)
 }
 
-async fn external_ids(
-    db: &mut SqliteConnection,
-    table: &'static str,
-    owner: &str,
-) -> Result<ExternalIds> {
-    // The table is a literal selected by the record loader.
-    let sql =
-        format!("SELECT provider, value FROM {table} WHERE owner_id = ? ORDER BY provider, value");
+async fn external_ids(db: &mut SqliteConnection, owner: &str) -> Result<ExternalIds> {
     let mut ids = ExternalIds::new();
-    for row in query(AssertSqlSafe(sql)).bind(owner).fetch_all(db).await? {
+    for row in query(
+        "SELECT provider, value FROM external_ids WHERE owner_id = ? ORDER BY provider, value",
+    )
+    .bind(owner)
+    .fetch_all(db)
+    .await?
+    {
         let label: &str = row.try_get("provider")?;
         let provider = match label.strip_prefix("other:") {
             Some(name) => ExternalIdProvider::Other(name.to_owned()),
@@ -469,17 +451,13 @@ fn select_visuals(artwork: &mut Vec<Artwork>, mode: VisualData, primary: Artwork
     }
 }
 
-async fn artwork(
-    db: &mut SqliteConnection,
-    row: &SqliteRow,
-    [artwork_table, renditions, colors]: [&'static str; 3],
-) -> Result<Vec<Artwork>> {
+async fn artwork(db: &mut SqliteConnection, owner: Key<'_>) -> Result<Vec<Artwork>> {
     let mut artwork = Vec::new();
-    for art in children(db, artwork_table, Key::Text(row.try_get("id")?)).await? {
+    for art in children(db, "artwork", owner).await? {
         let owner = Key::Number(art.try_get("id")?);
         artwork.push(Artwork {
             kind: unit_enum(art.try_get("kind")?)?,
-            files: ordered(db, renditions, owner, |row| {
+            files: ordered(db, "artwork_renditions", owner, |row| {
                 Ok(Rendition {
                     url: row.try_get("url")?,
                     width: row.try_get("width")?,
@@ -489,7 +467,7 @@ async fn artwork(
                 })
             })
             .await?,
-            colors: ordered(db, colors, owner, |row| parse(row, "color")).await?,
+            colors: ordered(db, "artwork_colors", owner, |row| parse(row, "color")).await?,
             blurhash: art.try_get("blurhash")?,
             explicit: art.try_get("explicit")?,
         });
