@@ -15,6 +15,11 @@ use topcoat::{
 
 static MIGRATIONS: Migrator = sqlx::migrate!();
 const MAX_PAGE: u32 = 100;
+pub enum LookupMatch<T> {
+    Missing,
+    Ambiguous,
+    Found(T),
+}
 
 /// The local catalog database.
 #[derive(Clone)]
@@ -34,9 +39,9 @@ impl Store {
         Ok(Self(pool))
     }
 
-    pub async fn lookup<T: DatabaseRecord>(&self, lookup: &SqlLookup) -> Result<Option<T>> {
+    pub async fn lookup<T: DatabaseRecord>(&self, lookup: &SqlLookup) -> Result<LookupMatch<T>> {
         let Some(predicate) = lookup.where_clause() else {
-            return Ok(None);
+            return Ok(LookupMatch::Missing);
         };
         let cursor_param = lookup.args.len() + 1;
         let limit_param = cursor_param + 1;
@@ -68,7 +73,7 @@ impl Store {
                 .fetch_all(&mut *db)
                 .await?;
             if !lookup.has_field_filters() && rows.len() > 1 {
-                return Ok(None);
+                return Ok(LookupMatch::Ambiguous);
             }
             let full = rows.len() == page_size;
             for row in rows {
@@ -79,7 +84,7 @@ impl Store {
                 }
                 if lookup.matches(&record)? {
                     if found.is_some() {
-                        return Ok(None);
+                        return Ok(LookupMatch::Ambiguous);
                     }
                     found = Some(record);
                 }
@@ -94,7 +99,7 @@ impl Store {
                     record.select_relations(&mut db, lookup.options).await?;
                 }
                 db.commit().await?;
-                return Ok(found);
+                return Ok(found.map_or(LookupMatch::Missing, LookupMatch::Found));
             }
         }
     }

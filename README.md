@@ -70,7 +70,7 @@ Tracks use their own release date when present and otherwise inherit the primary
 [`concentus_types`](crates/concentus_types/) defines its request and response types,
 and [`concentus`](crates/concentus/) provides the async HTTP client.
 
-The unversioned `/api/` routes serve the current schema.
+The `/api/` routes serve the current Postcard schema.
 
 | Method and path | Postcard body |
 | --- | --- |
@@ -78,10 +78,8 @@ The unversioned `/api/` routes serve the current schema.
 | `GET /api/{collection}/{id}` | Returns `T`, or HTTP 404. |
 | `POST /api/{collection}/lookup` | Accepts `Lookup<T>` and returns `Option<T>`. |
 
-HTTP bodies use `application/vnd.concentus.postcard`. Both sides send
-`x-concentus-schema`. Once clients are in use, increment `SCHEMA_REVISION` in
-`concentus_types` when the binary layout changes and release the client and server together. The server
-returns HTTP 409 for a missing or mismatched revision.
+HTTP bodies use `application/vnd.concentus.postcard`. Build the client and server
+against the same version of `concentus_types`.
 
 Run `just dev` from the workspace root. It uses `topcoat dev -p concentus_server`
 to watch for changes and print the Web UI address when the server is ready.
@@ -90,24 +88,38 @@ For a standalone run, use `cargo run --locked -p concentus_server`.
 The Web UI searches the local catalog first. On an empty artist, album, or track
 search, it queries the keyless MusicBrainz API and saves the returned music
 metadata and relationships in SQLite. The results page opens immediately and
-streams matches as each collection is imported. Album tracklists fill in after
-release details arrive. For an artist and title together, enter
-`Artist - Title`. Album results are imported per release and include ordered
-discs and tracks when MusicBrainz supplies a tracklist. Imported IDs are reused
-on later searches. The optional `CONCENTUS_MUSICBRAINZ_ENDPOINT` selects a
-MusicBrainz-compatible API endpoint for a mirror or local development.
+streams matches as each collection is imported. For an artist and title
+together, enter `Artist - Title`. Album results are imported per release.
+The optional `CONCENTUS_MUSICBRAINZ_ENDPOINT` selects a MusicBrainz-compatible
+API endpoint for a mirror or local development.
 
 Album and track covers try the Cover Art Archive by release and then by release
-group when available. Artist portraits use locally stored artwork.
+group when available. Missing fields are queued after an import. A background
+worker checks the queue every minute for MusicBrainz details, Wikidata artist
+metadata, Commons portraits, and LRCLIB lyrics. Successful checks retire their
+queue entries even when no data is available. Request failures stay queued
+for retry.
 
-The Postcard lookup API currently reads the local catalog. Imported records are
-immediately available to it.
+Use **Edit metadata** on an artist, album, or track page to save individual
+fields, edit grouped related rows together, or queue a field or entire record
+for refresh. Field and record history can restore earlier values. Revisions
+keep the value before the first edit and the latest value in each UTC minute.
+
+For local testing, the optional `CONCENTUS_LRCLIB_ENDPOINT`,
+`CONCENTUS_WIKIDATA_ENDPOINT`, and `CONCENTUS_COMMONS_ENDPOINT` variables
+override the respective API URLs.
+
+The Postcard lookup API returns a unique local match immediately. On a true
+miss, it can discover records using MusicBrainz for supported identifiers or
+search criteria, then reruns the original exact lookup. Ambiguous matches
+return no record.
 The server listens on `127.0.0.1:3000` by default. Set `HOST` or `PORT` to override it.
 
 On Linux, the database lives at `$XDG_STATE_HOME/concentus/catalog.sqlite3`, defaulting
 to `~/.local/state/concentus/catalog.sqlite3`. Set `CONCENTUS_DATABASE` to use a different
-file. SQLx creates the database and applies the [SQLite migrations](crates/concentus_server/migrations/)
-on startup. Migrations are grouped by record, including each record's child tables.
+file. SQLx creates the database and applies the [initial SQLite schema](crates/concentus_server/migrations/0001_initial.sql)
+on startup. The schema groups each record with its child tables and keeps the
+enrichment queue and revision history together.
 SQLite defines the columns and relationships. Rust parses domain values such as colors,
 dates, and enum labels when reading records, so a
 future rename can update the stored values and the Rust enum together. External IDs are
@@ -120,6 +132,5 @@ Tracks, albums, and artists own their artwork rows. Albums and artists own their
 theme columns. Tags have their
 own records so their IDs can be shared across the catalog.
 
-For imports with references between albums and tracks, enable SQLite foreign keys and
-insert related records in one transaction. If you have a database from an earlier
-schema, choose a fresh file with `CONCENTUS_DATABASE`.
+For direct SQL imports with references between albums and tracks, enable SQLite
+foreign keys and insert related records in one transaction.

@@ -1,16 +1,25 @@
-use crate::{lookup::SqlLookup, records::DatabaseRecord, store::store};
+use crate::{
+    catalog::Kind,
+    enrichment::{Discovery, Enrichment},
+    lookup::SqlLookup,
+    records::DatabaseRecord,
+    store::{LookupMatch, store},
+};
 use concentus_types::{
-    Album, ApiError, Artist, CONTENT_TYPE, Lookup, SCHEMA_HEADER, SCHEMA_REVISION, Tag, Track,
-    decode, encode,
+    Album, ApiError, Artist, CONTENT_TYPE, Lookup, PageQuery, Tag, Track, decode, encode,
 };
 use serde::Serialize;
 use topcoat::{
     Result,
-    context::Cx,
+    context::{Cx, context},
     router::{
         Body, Method, Path, RouteFn, RouteFuture, RouterBuilder, StatusCode,
-        error::ContentTooLargeError, path_param, query_params, request::headers,
-        response::Response, to_bytes,
+        content::Form,
+        error::ContentTooLargeError,
+        path_param,
+        request::{FromRequest, headers},
+        response::Response,
+        to_bytes,
     },
 };
 
@@ -45,12 +54,9 @@ fn routes<T: DatabaseRecord>() -> [RouteFn; 3] {
     ]
 }
 
-fn list<T: DatabaseRecord>(cx: &Cx, _body: Body) -> RouteFuture<'_> {
+fn list<T: DatabaseRecord>(cx: &Cx, body: Body) -> RouteFuture<'_> {
     Box::pin(async move {
-        if let Some(response) = check_schema(cx)? {
-            return Ok(response);
-        }
-        let Ok(query) = query_params::<PageQuery>(cx) else {
+        let Ok(Form(query)) = Form::<PageQuery>::from_request(cx, body).await else {
             return error(StatusCode::BAD_REQUEST, "Invalid pagination parameters.");
         };
         match store(cx)
@@ -65,9 +71,6 @@ fn list<T: DatabaseRecord>(cx: &Cx, _body: Body) -> RouteFuture<'_> {
 
 fn get<T: DatabaseRecord>(cx: &Cx, _body: Body) -> RouteFuture<'_> {
     Box::pin(async move {
-        if let Some(response) = check_schema(cx)? {
-            return Ok(response);
-        }
         match store(cx).get::<T>(id(cx)).await {
             Ok(Some(record)) => postcard(StatusCode::OK, &record),
             Ok(None) => error(StatusCode::NOT_FOUND, "Record not found."),
@@ -78,9 +81,6 @@ fn get<T: DatabaseRecord>(cx: &Cx, _body: Body) -> RouteFuture<'_> {
 
 fn lookup<T: DatabaseRecord>(cx: &Cx, body: Body) -> RouteFuture<'_> {
     Box::pin(async move {
-        if let Some(response) = check_schema(cx)? {
-            return Ok(response);
-        }
         let content_type = headers(cx)
             .get("content-type")
             .and_then(|value| value.to_str().ok())
@@ -104,29 +104,29 @@ fn lookup<T: DatabaseRecord>(cx: &Cx, body: Body) -> RouteFuture<'_> {
         let Ok(request) = decode::<Lookup<T>>(&bytes) else {
             return error(StatusCode::BAD_REQUEST, "Invalid Postcard lookup request.");
         };
+        let kind = Kind::parse(T::NAME);
+        let seed = kind.and_then(|kind| Discovery::from_lookup(kind, &request));
         let criteria = match SqlLookup::from_request(request) {
             Ok(criteria) => criteria,
             Err(message) => return error(StatusCode::BAD_REQUEST, message),
         };
-        match store(cx).lookup::<T>(&criteria).await {
-            Ok(record) => postcard(StatusCode::OK, &record),
+        let db = store(cx);
+        let mut result = db.lookup::<T>(&criteria).await;
+        if matches!(result, Ok(LookupMatch::Missing))
+            && let (Some(kind), Some(seed)) = (kind, seed)
+        {
+            let enrichment: &Enrichment = context(cx);
+            enrichment.discover(db, kind, seed).await;
+            result = db.lookup::<T>(&criteria).await;
+        }
+        match result {
+            Ok(LookupMatch::Found(record)) => postcard(StatusCode::OK, &Some(record)),
+            Ok(LookupMatch::Missing | LookupMatch::Ambiguous) => {
+                postcard(StatusCode::OK, &Option::<T>::None)
+            }
             Err(cause) => store_error(&cause),
         }
     })
-}
-
-fn check_schema(cx: &Cx) -> Result<Option<Response>> {
-    if headers(cx)
-        .get(SCHEMA_HEADER)
-        .is_some_and(|value| value == SCHEMA_REVISION)
-    {
-        return Ok(None);
-    }
-    error(
-        StatusCode::CONFLICT,
-        "Incompatible Concentus schema revision.",
-    )
-    .map(Some)
 }
 
 fn postcard(status: StatusCode, message: &impl Serialize) -> Result<Response> {
@@ -134,7 +134,6 @@ fn postcard(status: StatusCode, message: &impl Serialize) -> Result<Response> {
     Ok(Response::builder()
         .status(status)
         .header("content-type", CONTENT_TYPE)
-        .header(SCHEMA_HEADER, SCHEMA_REVISION)
         .header("cache-control", "no-store")
         .body(Body::from(bytes))?)
 }
@@ -157,9 +156,3 @@ fn store_error(cause: &topcoat::Error) -> Result<Response> {
 }
 
 path_param!(id);
-
-#[query_params(error = bad_request)]
-struct PageQuery {
-    after: Option<String>,
-    limit: Option<u32>,
-}

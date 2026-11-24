@@ -175,6 +175,11 @@ pub fn render<'a>(cx: &'a Cx, page: &'a Page) -> BoxView<'a> {
 
 fn heading<'a>(cx: &'a Cx, page: &'a Page, record: &'a Detail) -> BoxView<'a> {
     view! {
+        if Kind::MUSIC.contains(&page.kind) {
+            <a class="edit-link" href=(format!("{}/edit", page.kind.href(&page.id)))>
+                "Edit metadata"
+            </a>
+        }
         <section class="record-heading">
             <div class="cover" aria-hidden="true">
                 (icon(page.kind))

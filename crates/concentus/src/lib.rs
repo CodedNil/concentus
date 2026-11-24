@@ -3,8 +3,7 @@
 pub use concentus_types as types;
 use concentus_types::{
     Album, AlbumLookup, ApiError, Artist, ArtistLookup, CONTENT_TYPE, CodecError, Collection, Id,
-    Lookup, PageQuery, SCHEMA_HEADER, SCHEMA_REVISION, Tag, TagLookup, Track, TrackLookup, decode,
-    encode,
+    Lookup, PageQuery, Tag, TagLookup, Track, TrackLookup, decode, encode,
 };
 use reqwest::{RequestBuilder, Response, StatusCode, Url, header};
 use serde::de::DeserializeOwned;
@@ -17,11 +16,6 @@ pub enum Error {
     Http(#[from] reqwest::Error),
     #[error("Postcard codec error: {0}")]
     Codec(#[from] CodecError),
-    #[error("Concentus schema mismatch (expected {expected}, received {actual})")]
-    SchemaMismatch {
-        expected: &'static str,
-        actual: String,
-    },
     #[error("unexpected response from Concentus ({0})")]
     UnexpectedResponse(StatusCode),
     #[error("Concentus returned {status}: {message}")]
@@ -104,32 +98,16 @@ impl Client {
 }
 
 async fn send(request: RequestBuilder) -> Result<Response, Error> {
-    let response = request
-        .header(SCHEMA_HEADER, SCHEMA_REVISION)
-        .header(header::ACCEPT, CONTENT_TYPE)
-        .send()
-        .await?;
-    let revision = response
-        .headers()
-        .get(SCHEMA_HEADER)
-        .and_then(|value| value.to_str().ok());
+    let response = request.header(header::ACCEPT, CONTENT_TYPE).send().await?;
     let content_type = response
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next());
-    match revision {
-        Some(SCHEMA_REVISION)
-            if content_type
-                .is_some_and(|value| value.trim().eq_ignore_ascii_case(CONTENT_TYPE)) =>
-        {
-            Ok(response)
-        }
-        Some(actual) if actual != SCHEMA_REVISION => Err(Error::SchemaMismatch {
-            expected: SCHEMA_REVISION,
-            actual: actual.into(),
-        }),
-        _ => Err(Error::UnexpectedResponse(response.status())),
+    if content_type.is_some_and(|value| value.trim().eq_ignore_ascii_case(CONTENT_TYPE)) {
+        Ok(response)
+    } else {
+        Err(Error::UnexpectedResponse(response.status()))
     }
 }
 

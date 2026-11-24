@@ -4,6 +4,7 @@ use store::Store;
 
 mod api;
 mod catalog;
+mod editor;
 mod enrichment;
 mod lookup;
 mod records;
@@ -15,9 +16,11 @@ async fn main() -> topcoat::Result<()> {
     let database = database_path()?;
     let store = Store::open(&database).await?;
     eprintln!("Concentus database: {}", database.display());
+    let enrichment = enrichment::Enrichment::new()?;
+    enrichment.clone().worker(store.clone());
     let router = topcoat::router::Router::builder()
         .with(store)
-        .with(enrichment::Enrichment::new()?);
+        .with(enrichment);
     Ok(topcoat::start(api::register(web::register(router)).build()).await?)
 }
 

@@ -108,3 +108,11 @@ footer { margin-top: 3rem; border-top: 1px solid var(--line); padding: 1rem 0 2r
     .tabs { gap: 1rem; }
     .page-heading { padding-top: 2rem; }
 }
+.edit-link { display: inline-block; margin-top: 1rem; }
+.editor-panel { padding: 1rem 1.25rem; }
+.editor-panel form { margin: .75rem 0; }
+.editor-panel button { padding: .4rem .7rem; border-radius: .35rem; margin-right: .4rem; }
+.editor-panel textarea { display: block; width: 100%; margin: .4rem 0; padding: .65rem; color: inherit; background: #121615; border: 1px solid var(--line); font: .85rem monospace; }
+.editor-panel summary { cursor: pointer; color: var(--accent); }
+.editor-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.revision { border-top: 1px solid var(--line); margin-top: .5rem; padding-top: .5rem; }

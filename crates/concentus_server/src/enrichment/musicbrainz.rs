@@ -14,6 +14,44 @@ pub struct MusicBrainz {
 }
 
 impl MusicBrainz {
+    pub async fn entity(&self, kind: Kind, id: uuid::Uuid) -> Result<Batch> {
+        Ok(match kind {
+            Kind::Artist => Batch::Artists(vec![
+                self.request(&format!("artist/{id}"), &[("inc", "tags")])
+                    .await?,
+            ]),
+            Kind::Album => Batch::Releases(vec![self.release(id).await?]),
+            Kind::Track => Batch::Recordings(vec![
+                self.request(
+                    &format!("recording/{id}"),
+                    &[("inc", "artist-credits+releases+isrcs+tags")],
+                )
+                .await?,
+            ]),
+            Kind::Tag => return Err(Error::msg("MusicBrainz does not resolve Concentus tags")),
+        })
+    }
+    pub async fn wikidata_id(&self, id: uuid::Uuid) -> Result<Option<String>> {
+        let artist: ArtistLinks = self
+            .request(&format!("artist/{id}"), &[("inc", "url-rels")])
+            .await?;
+        let mut ids = artist
+            .relations
+            .into_iter()
+            .filter(|relation| relation.kind == "wikidata")
+            .filter_map(|relation| {
+                let url = Url::parse(&relation.url?.resource).ok()?;
+                let id = url.path().strip_prefix("/wiki/")?;
+                (matches!(url.host_str(), Some("www.wikidata.org" | "wikidata.org"))
+                    && super::wikidata::valid_id(id))
+                .then(|| id.to_owned())
+            })
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(if ids.len() == 1 { ids.pop() } else { None })
+    }
+
     pub fn new() -> Result<Self> {
         let endpoint = match env::var("CONCENTUS_MUSICBRAINZ_ENDPOINT") {
             Ok(endpoint) => endpoint,
@@ -87,13 +125,11 @@ impl MusicBrainz {
             Kind::Album => {
                 Batch::Releases(self.request::<Search>("release", &params).await?.releases)
             }
-            Kind::Tag => Batch::Artists(Vec::new()),
+            Kind::Tag => return Err(Error::msg("MusicBrainz does not search Concentus tags")),
         })
     }
-}
 
-impl MusicBrainz {
-    pub async fn release(&self, id: uuid::Uuid) -> Result<Release> {
+    async fn release(&self, id: uuid::Uuid) -> Result<Release> {
         self.request(
             &format!("release/{id}"),
             &[(
@@ -103,6 +139,24 @@ impl MusicBrainz {
         )
         .await
     }
+}
+
+#[derive(Deserialize)]
+struct ArtistLinks {
+    #[serde(default)]
+    relations: Vec<Relation>,
+}
+
+#[derive(Deserialize)]
+struct Relation {
+    #[serde(rename = "type")]
+    kind: String,
+    url: Option<RelationshipUrl>,
+}
+
+#[derive(Deserialize)]
+struct RelationshipUrl {
+    resource: String,
 }
 
 fn search_query(kind: Kind, input: &str) -> String {

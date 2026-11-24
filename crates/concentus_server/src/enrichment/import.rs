@@ -2,6 +2,7 @@ use super::{
     cover_art_archive::{RELEASE_GROUP_PROVIDER, front},
     musicbrainz::{Artist, Batch, Credit, Recording, Release, SourceTag},
 };
+use crate::editor;
 use crate::{catalog::Kind, store::Store};
 use concentus_types::{Id, Isrc, PartialDate};
 use sqlx::{AssertSqlSafe, SqliteConnection, query, query_scalar};
@@ -11,16 +12,22 @@ use uuid::Uuid;
 pub async fn save(store: &Store, batch: Batch) -> Result<Vec<String>> {
     // Serialize identity resolution and writes across requests and processes.
     let mut db = store.0.begin_with("BEGIN IMMEDIATE").await?;
+    let ids = apply(&mut db, batch).await?;
+    db.commit().await?;
+    Ok(ids)
+}
+
+pub async fn apply(db: &mut SqliteConnection, batch: Batch) -> Result<Vec<String>> {
     let mut ids = Vec::new();
     match batch {
         Batch::Artists(artists) => {
             for value in artists {
-                ids.push(artist(&mut db, &value).await?);
+                ids.push(artist(db, &value).await?);
             }
         }
         Batch::Releases(releases) => {
             for value in releases {
-                ids.push(release(&mut db, &value, true).await?);
+                ids.push(release(db, &value, true).await?);
             }
         }
         Batch::Recordings(recordings) => {
@@ -37,14 +44,13 @@ pub async fn save(store: &Store, batch: Batch) -> Result<Vec<String>> {
                     )
                 });
                 let album = match primary {
-                    Some(value) => Some(release(&mut db, value, false).await?),
+                    Some(value) => Some(release(db, value, false).await?),
                     None => None,
                 };
-                ids.push(recording(&mut db, &value, album.as_deref(), None, None).await?);
+                ids.push(recording(db, &value, album.as_deref(), None, None).await?);
             }
         }
     }
-    db.commit().await?;
     Ok(ids)
 }
 
@@ -95,6 +101,7 @@ async fn external(
 
 async fn artist(db: &mut SqliteConnection, artist: &Artist) -> Result<String> {
     let id = identity(db, Kind::Artist, &artist.id).await?;
+    let before = editor::snapshot(db, Kind::Artist, &id).await?;
     let kind = match artist.kind.as_deref() {
         Some("Person") => "Person",
         Some("Group" | "Orchestra" | "Choir") => "Group",
@@ -140,6 +147,7 @@ async fn artist(db: &mut SqliteConnection, artist: &Artist) -> Result<String> {
         external(db, Kind::Artist, &id, "Ipi", value).await?;
     }
     tags(db, Kind::Artist, &id, &artist.tags).await?;
+    editor::finish_import(db, Kind::Artist, &id, &before).await?;
     Ok(id)
 }
 
@@ -149,6 +157,7 @@ async fn release(
     include_tracks: bool,
 ) -> Result<String> {
     let id = identity(db, Kind::Album, &release.id).await?;
+    let before = editor::snapshot(db, Kind::Album, &id).await?;
     let album_type = release.group.as_ref().and_then(|group| {
         if group.secondary_types.iter().any(|ty| ty == "Soundtrack") {
             return Some("Soundtrack");
@@ -260,6 +269,7 @@ async fn release(
             }
         }
     }
+    editor::finish_import(db, Kind::Album, &id, &before).await?;
     Ok(id)
 }
 
@@ -271,6 +281,7 @@ async fn recording(
     alternate_credits: Option<&[Credit]>,
 ) -> Result<String> {
     let id = identity(db, Kind::Track, &recording.id).await?;
+    let before = editor::snapshot(db, Kind::Track, &id).await?;
     query("INSERT INTO tracks (id, title, duration_ms, album_id, release_date) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             album_id = coalesce(tracks.album_id, excluded.album_id),
@@ -291,6 +302,7 @@ async fn recording(
     };
     credits(db, Kind::Track, &id, billed).await?;
     tags(db, Kind::Track, &id, &recording.tags).await?;
+    editor::finish_import(db, Kind::Track, &id, &before).await?;
     Ok(id)
 }
 

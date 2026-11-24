@@ -1,5 +1,6 @@
 mod artwork;
 mod detail;
+mod editor;
 
 use crate::{
     catalog::{Entry, Kind},
@@ -16,7 +17,12 @@ use topcoat::{
 };
 
 pub fn register(builder: RouterBuilder) -> RouterBuilder {
-    builder.route(stylesheet).page(home).page(record)
+    builder
+        .route(stylesheet)
+        .page(home)
+        .page(record)
+        .page(editor::edit_page)
+        .route(editor::edit_action)
 }
 
 #[route(GET "/assets/catalog.css")]
@@ -42,21 +48,11 @@ struct Section {
 
 #[page("/")]
 async fn home(cx: &Cx) -> Result<impl View> {
-    let params = query_params::<SearchParams>(cx).ok();
-    let selected = params
-        .as_ref()
-        .and_then(|params| params.kind.as_deref())
-        .and_then(Kind::parse);
-    let input = params
-        .as_ref()
-        .and_then(|params| params.q.as_deref())
-        .unwrap_or_default()
-        .trim();
+    let params = query_params::<SearchParams>(cx)?;
+    let selected = params.kind.as_deref().and_then(Kind::parse);
+    let input = params.q.as_deref().unwrap_or_default().trim();
     let query: String = input.chars().take(160).collect();
-    let after = params
-        .as_ref()
-        .and_then(|params| params.after.as_deref())
-        .unwrap_or_default();
+    let after = params.after.as_deref().unwrap_or_default();
     let db = store(cx);
     let mut sections = Vec::new();
     let kinds = selected

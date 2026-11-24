@@ -3,9 +3,6 @@
 pub use postcard::Error as CodecError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-/// Increment this whenever the Postcard representation of a request or reply changes.
-pub const SCHEMA_REVISION: &str = "1";
-pub const SCHEMA_HEADER: &str = "x-concentus-schema";
 pub const CONTENT_TYPE: &str = "application/vnd.concentus.postcard";
 
 pub fn encode<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, CodecError> {
